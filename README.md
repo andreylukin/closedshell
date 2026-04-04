@@ -232,12 +232,48 @@ aws:
 
 Sourced from public IAM/RBAC docs. Embedded in binary. Updatable via config override.
 
-### 6. Credential Vault
+### 6. Credential Mounts
 
-- Credentials stored on host, never inside sandbox
-- Proxy injects auth headers/signatures into approved requests
-- For AWS: generates short-lived STS tokens scoped to current permission tree
-- Double enforcement: proxy checks tree AND STS policy limits blast radius
+Credentials are mounted directly into the sandbox. The agent can read them, but **cannot use them to bypass the proxy** — seccomp-bpf + iptables force all network traffic through the proxy regardless. The sandbox boundary is the enforcement layer, not credential hiding.
+
+#### Configuration
+
+```yaml
+sandbox:
+  credentials:
+    - type: file
+      source: ~/.aws/credentials
+      mount: ~/.aws/credentials
+      readonly: true
+
+    - type: env
+      vars: [OPENAI_API_KEY, GITHUB_TOKEN]
+
+    - type: socket
+      source: $SSH_AUTH_SOCK
+      mount: /tmp/ssh-agent.sock
+
+    - type: oauth
+      provider: gcp
+      token_path: ~/.config/gcloud/
+      refresh_interval: 45m    # daemon refreshes on host, remounts
+```
+
+#### Mount Types
+
+| Type | Example | Behavior |
+|------|---------|----------|
+| `file` | `~/.aws/credentials`, `~/.kube/config` | Read-only bind mount into sandbox |
+| `env` | `OPENAI_API_KEY`, `GITHUB_TOKEN` | Passed as environment variables at sandbox creation |
+| `socket` | `SSH_AUTH_SOCK`, Docker socket | Socket mounted into sandbox |
+| `oauth` | GCP, Azure AD | Daemon refreshes tokens on host side on `refresh_interval`, remounts into sandbox. Agent always sees a valid token. |
+
+#### Security Model
+
+- Agent tools work naturally — `aws`, `gcloud`, `kubectl` find credentials where they expect them.
+- All network traffic still goes through the proxy, which enforces the permission tree.
+- Even if the agent reads raw credentials, it cannot make network calls that bypass the proxy.
+- OAuth tokens that expire mid-session are refreshed by the daemon on the host side — the agent doesn't know or care.
 
 ### 7. Human Approval Interface
 
@@ -416,6 +452,20 @@ DENIED: aws:ecs:UpdateService (permission p-002 revoked)
 sandbox:
   motd: true                    # show ask CLI usage on entry
   implicit_ask: true            # auto-request permissions on first access
+  credentials:
+    - type: file
+      source: ~/.aws/credentials
+      mount: ~/.aws/credentials
+      readonly: true
+    - type: env
+      vars: [OPENAI_API_KEY, GITHUB_TOKEN]
+    - type: socket
+      source: $SSH_AUTH_SOCK
+      mount: /tmp/ssh-agent.sock
+    - type: oauth
+      provider: gcp
+      token_path: ~/.config/gcloud/
+      refresh_interval: 45m
 
 judge:
   api_base: "http://localhost:11434/v1"
@@ -440,13 +490,96 @@ approval:
     moderate: "30s"
     dangerous: null             # never auto-approve
   webhook_url: ""               # Slack / PagerDuty / custom
-
-credentials:
-  aws:
-    use_sts: true
-    session_duration: "1h"
-  # ... per-provider credential config
 ```
+
+---
+
+## Development Sections
+
+The project is broken into independently iterable sections, ordered by dependency.
+
+### Section 1: Sandbox + Daemon + Proxy (the enforcement plane)
+
+Everything that makes the sandbox work end-to-end. This is one integrated deliverable because the namespace setup, daemon IPC, and proxy are tightly coupled — you can't meaningfully test the proxy without the sandbox network namespace, and the daemon/socket is glue between them.
+
+**Scope:**
+- Linux namespaces (net, pid, mount, user) for isolation
+- seccomp-bpf with `SECCOMP_RET_USER_NOTIF` on execve, connect, sendto
+- Host-side daemon process + Unix socket IPC
+- `ask` CLI skeleton (read-only commands first: status, why-denied)
+- Transparent MITM proxy with session-scoped CA, iptables redirect
+- Provider parsers (generic `net:METHOD:host/path` first, then AWS/GCP/etc.)
+- Credential mounts (file, env, socket, oauth with daemon-side refresh)
+- Tree lookup on every request — unknown = deny (no judge yet)
+- `closedshell create -- <cmd>` lifecycle
+
+**Deliverable:** A locked sandbox where all network traffic is intercepted, parsed, and checked against the permission tree. Credentials mounted in, OAuth refreshed by daemon. End-to-end from `closedshell create` to denied/approved request.
+
+### Section 2: Permission Tree
+
+Standalone, fully unit-testable data structure. No system dependencies — can start day one alongside Section 1.
+
+**Scope:**
+- In-memory permission store, session-scoped
+- Permission types: idempotent, one-shot, state-dependent
+- Regex matching, expiry, consumption logic
+- CRUD via internal API
+
+**Deliverable:** A well-tested library that Section 1 consumes for tree lookups.
+
+### Section 3: Judge Integration
+
+Plugs into the proxy to make real permission decisions.
+
+**Scope:**
+- OpenAI-compatible API client (structured JSON I/O)
+- Risk taxonomy (baked-in + config override)
+- Decision matrix (safe→approve, dangerous→escalate, timeout→deny)
+- Implicit ask flow (proxy holds request while judge evaluates)
+- Explicit `ask allow` and `ask plan` flows
+
+**Deliverable:** Judge makes real decisions. Implicit ask works end-to-end — agent runs a command, proxy intercepts, judge evaluates, permission granted or denied transparently.
+
+### Section 4: Human Approval
+
+Escalation path for actions the judge won't auto-approve.
+
+**Scope:**
+- Pending approval queue in daemon
+- `closedshell approvals` host-side CLI
+- Auto-approve timeouts per risk tier
+- Webhook support (Slack, PagerDuty, custom endpoint)
+- Plan context shown to approvers
+
+**Deliverable:** `escalate_human` decisions route to a human and block until resolved.
+
+### Section 5: Preconditions
+
+The most complex permission type — touches proxy, tree, and host-side execution.
+
+**Scope:**
+- Point-of-use verification in proxy (before forwarding request)
+- Cached results with configurable `max_staleness`
+- Background sweep for cleanup (not enforcement)
+- Host-side precondition command execution with hard timeout
+- Auto-revoke on precondition failure
+
+**Deliverable:** State-dependent permissions fully enforced. Preconditions verified at point-of-use, cached intelligently, cleaned up in background.
+
+### Dependency Graph
+
+```
+Section 2 (permission tree) ── starts day one, consumed by Section 1
+
+Section 1 (sandbox+daemon+proxy) ──→ Section 3 (judge) ──→ Section 5 (preconditions)
+                                 ──→ Section 4 (human approval)
+```
+
+### Recommended Build Order (solo dev)
+
+1. **Section 1 + Section 2** in parallel
+2. **Section 3** (judge — proxy becomes useful)
+3. **Section 4 + Section 5** in parallel
 
 ---
 
