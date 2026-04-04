@@ -64,65 +64,35 @@ ask what-can-i "<pattern>"    # query tree without requesting (discovery)
 
 ### 3. Permission Tree
 
-```yaml
-session: "8f3a-29c1"
-trust_level: base
-permissions:
-  - id: "p-001"
-    action: "aws[profile=dev]:ec2:Describe*"
-    type: idempotent          # idempotent | one-shot | state-dependent
-    approved_by: judge
-    created: "2026-04-03T14:00:00Z"
+Cedar-inspired evaluation model: **forbid-overrides-permit, default deny, order-independent.** Every rule has an explicit `permit` or `forbid` effect. Forbid rules are hard safety rails that the judge cannot override.
 
-  - id: "p-002"
+```yaml
+rules:
+  - effect: forbid
+    action: "aws[profile=prod]:*:Delete*"
+    reason: "session policy: no production deletes"
+
+  - effect: permit
+    action: "aws[profile=dev]:ec2:Describe*"
+    type: idempotent
+    approved_by: judge
+
+  - effect: permit
     action: "aws[profile=prod]:ecs:UpdateService"
     type: one-shot
     approved_by: human:@oncall
-    preconditions:
+    when:
       - cmd: "aws ecs describe-services --service api --profile prod"
         jsonpath: ".services[0].runningCount"
         expect: ">= 2"
-        max_staleness: "30s"  # cached result valid for 30s
-    plan_id: "plan-007"
-    consumed: false
-    expires: "2026-04-03T16:00:00Z"
-
-  - id: "p-003"
-    action: "net:GET:api.github.com/repos/.*"
-    type: idempotent
-    approved_by: judge
+        max_staleness: "30s"
 ```
 
-#### Permission Types
-
-| Type | Behavior | Revocation |
-|------|----------|------------|
-| `idempotent` | Persistent for session. Regex match, pass through. | Session end or explicit revoke. |
-| `one-shot` | Consumed on use. Removed from tree after execution. | Auto after single use. |
-| `state-dependent` | Preconditions verified at point-of-use. Cached results honored within `max_staleness`. | Auto when preconditions fail. |
+Three permit types: `idempotent` (persistent), `one-shot` (consumed on use), `state-dependent` (preconditions verified at point-of-use). Action matching uses **glob patterns** (not regex) for static analyzability.
 
 All permissions are **session-scoped by default.** Promotion to org baseline requires explicit human action outside the session.
 
-#### Precondition Verification Strategy
-
-Preconditions follow a **Design by Contract** model: the proxy is the enforcement boundary, not a background timer.
-
-**Point-of-use verification (primary enforcement):**
-- When the proxy matches a `state-dependent` permission, it runs precondition checks *before* forwarding the request.
-- Results are cached with a configurable `max_staleness` per precondition (default: 30s).
-- If a cached result exists within staleness window, skip re-check. Otherwise, re-run.
-- If precondition fails at point-of-use: DENY, auto-revoke permission, log with reason.
-
-**Background sweep (cleanup only):**
-- Runs every 60s (configurable). Iterates state-dependent permissions.
-- Re-validates preconditions and revokes stale grants proactively.
-- Purpose: garbage collection of permissions the agent hasn't tried to use yet but whose preconditions have drifted.
-- **Not the enforcement boundary.** If the sweep hasn't run yet, point-of-use still catches it.
-
-**Precondition execution:**
-- Precondition commands run on the *host side* with the credential vault, not inside the sandbox.
-- Precondition commands have a hard timeout (default: 5s). Timeout = precondition failure.
-- Precondition results are structured (jsonpath + expect). No shell interpolation, no agent-controlled input.
+**Full design:** [docs/permission-tree.md](docs/permission-tree.md) — evaluation algorithm, action format, glob matching rules, forbid rule sources, plan derivation & revocation, schema validation.
 
 ### 4. Judge (model-agnostic, host-side)
 
@@ -229,14 +199,9 @@ Parsers are pluggable. Unknown APIs fall back to `net:<METHOD>:<host>/<path>`.
 
 #### Baked-in Risk Taxonomy
 
-```yaml
-aws:
-  safe:      [List*, Describe*, Get*, Head*]
-  moderate:  [Create*, Put*, Update*, Start*, Stop*, Tag*]
-  dangerous: [Delete*, Terminate*, Remove*, Revoke*, Detach*]
-```
+Safe/moderate/dangerous classification per provider, sourced from public IAM/RBAC docs. Embedded in binary, updatable via config override. Used for both judge input and permission tree schema validation.
 
-Sourced from public IAM/RBAC docs. Embedded in binary. Updatable via config override.
+See [docs/permission-tree.md § Schema](docs/permission-tree.md#schema-compile-time-validation) for the full taxonomy format.
 
 ### 6. Credential Mounts
 
@@ -312,11 +277,10 @@ Agent: aws s3 ls
   1. seccomp-notify fires on execve("aws") → allowed (binary ok)
   2. aws CLI → HTTPS request to s3.amazonaws.com
   3. Proxy parses: aws[profile=dev]:s3:ListBuckets
-  4. Tree check: not found
-  5. Proxy submits implicit ask to judge:
-     {action: "aws[profile=dev]:s3:ListBuckets", implicit: true, risk: "safe", ...}
-  6. Judge: approve, expand to aws[profile=dev]:s3:List*
-  7. Permission added to tree
+  4. Forbid check: no forbid matches
+  5. Permit check: no permit matches
+  6. Implicit ask → judge: {action, risk: "safe", ...}
+  7. Judge: approve → new permit rule: aws[profile=dev]:s3:List*
   8. Proxy forwards original request (no retry needed)
   9. Agent gets response as if nothing happened
   Total: < 200ms (agent never sees a denial)
@@ -358,16 +322,10 @@ Agent: ask plan "Rollback bad ECS deployment"
 ```
 Agent: aws ecs update-service --service api --desired-count 4
   1. Proxy parses: aws[profile=prod]:ecs:UpdateService
-  2. Tree match: p-002 aws[profile=prod]:ecs:UpdateService (state-dependent, one-shot)
-  3. Precondition check:
-     a. Cached result for "runningCount >= 2"?
-        - If within max_staleness (30s): use cached → PASS
-        - If stale or missing: re-run on host side
-     b. Run: aws ecs describe-services --service api (timeout: 5s)
-     c. Extract .services[0].runningCount via jsonpath
-     d. Evaluate: >= 2 → PASS (or FAIL → deny + revoke)
-  4. Precondition passed → forward request with injected credentials
-  5. Mark p-002 as consumed (one-shot)
+  2. Forbid check: no forbid matches
+  3. Permit match: p-002 (one-shot, has `when` conditions)
+  4. Verify `when` conditions (cached or fresh, see permission-tree.md)
+  5. Conditions pass → forward request → mark p-002 consumed
   Total: ~50ms (cached) to ~2s (fresh check)
 ```
 
@@ -382,14 +340,8 @@ Agent: ask what-can-i "aws[profile=dev]:s3:*"
 ```
 
 ### Background Sweep
-```
-Every 60s (configurable):
-  1. Iterate state-dependent permissions
-  2. Re-run precondition checks (host-side)
-  3. Auto-revoke where preconditions fail
-  4. Log revocation with reason
-  Purpose: cleanup only. Not the enforcement boundary.
-```
+
+Runs every 60s (configurable). Iterates state-dependent permissions, re-validates `when` conditions, auto-revokes stale grants. Cleanup only — not the enforcement boundary (point-of-use verification is).
 
 ---
 
@@ -523,12 +475,14 @@ Everything that makes the sandbox work end-to-end. This is one integrated delive
 
 ### Section 2: Permission Tree
 
-Standalone, fully unit-testable data structure. No system dependencies — can start day one alongside Section 1.
+Standalone, fully unit-testable data structure. No system dependencies — can start day one alongside Section 1. Design: [docs/permission-tree.md](docs/permission-tree.md).
 
 **Scope:**
 - In-memory permission store, session-scoped
+- Cedar-inspired evaluation: forbid-overrides-permit, default deny
 - Permission types: idempotent, one-shot, state-dependent
-- Regex matching, expiry, consumption logic
+- Glob matching, expiry, consumption logic
+- Schema validation against risk taxonomy
 - CRUD via internal API
 
 **Deliverable:** A well-tested library that Section 1 consumes for tree lookups.
@@ -559,18 +513,18 @@ Escalation path for actions the judge won't auto-approve.
 
 **Deliverable:** `escalate_human` decisions route to a human and block until resolved.
 
-### Section 5: Preconditions
+### Section 5: Preconditions (`when` conditions)
 
-The most complex permission type — touches proxy, tree, and host-side execution.
+The most complex permission type — touches proxy, tree, and host-side execution. See [docs/permission-tree.md § When Verification](docs/permission-tree.md#evaluation-algorithm).
 
 **Scope:**
-- Point-of-use verification in proxy (before forwarding request)
+- Point-of-use `when` condition verification in proxy (before forwarding request)
 - Cached results with configurable `max_staleness`
 - Background sweep for cleanup (not enforcement)
-- Host-side precondition command execution with hard timeout
-- Auto-revoke on precondition failure
+- Host-side condition command execution with hard timeout
+- Auto-revoke on condition failure
 
-**Deliverable:** State-dependent permissions fully enforced. Preconditions verified at point-of-use, cached intelligently, cleaned up in background.
+**Deliverable:** State-dependent permissions fully enforced. `when` conditions verified at point-of-use, cached intelligently, cleaned up in background.
 
 ### Dependency Graph
 
