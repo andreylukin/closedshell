@@ -44,8 +44,8 @@ run_agent() {
         --dangerously-skip-permissions \
         -p "$(cat AGENT_PROMPT.md)" \
         --model claude-opus-4-6 \
-        &> "$LOGFILE"
-    local exit_code=$?
+        2>&1 | tee "$LOGFILE"
+    local exit_code=${PIPESTATUS[0]}
 
     local duration=$(( SECONDS - start_time ))
     local lines=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
