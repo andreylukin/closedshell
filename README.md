@@ -2,6 +2,9 @@
 
 **One-liner:** A lightweight sandbox that lets AI agents discover their own permissions through a CLI, with context-aware, consumable permission tokens enforced at the network and syscall layer.
 
+> **Implementation target: macOS (Apple Silicon) via Seatbelt + MITM Proxy.**
+> See [docs/architecture.md](docs/architecture.md) for the full architecture decision and interception model.
+
 ---
 
 ## Architecture
