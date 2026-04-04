@@ -69,17 +69,17 @@ session: "8f3a-29c1"
 trust_level: base
 permissions:
   - id: "p-001"
-    action: "aws:ec2:Describe*"
+    action: "aws[profile=dev]:ec2:Describe*"
     type: idempotent          # idempotent | one-shot | state-dependent
     approved_by: judge
     created: "2026-04-03T14:00:00Z"
 
   - id: "p-002"
-    action: "aws:ecs:UpdateService"
+    action: "aws[profile=prod]:ecs:UpdateService"
     type: one-shot
     approved_by: human:@oncall
     preconditions:
-      - cmd: "aws ecs describe-services --service api"
+      - cmd: "aws ecs describe-services --service api --profile prod"
         jsonpath: ".services[0].runningCount"
         expect: ">= 2"
         max_staleness: "30s"  # cached result valid for 30s
@@ -158,8 +158,8 @@ judge:
 
 ```json
 {
-  "requested_action": "aws:ecs:UpdateService",
-  "current_tree": ["aws:ecs:Describe*", "aws:ecs:List*"],
+  "requested_action": "aws[profile=prod]:ecs:UpdateService",
+  "current_tree": ["aws[profile=prod]:ecs:Describe*", "aws[profile=prod]:ecs:List*"],
   "session_context": {"task": "investigate 503s in us-east-1"},
   "provider_risk_tier": "moderate",
   "action_taxonomy": "state-change",
@@ -192,8 +192,9 @@ The `implicit` field indicates whether this came from an explicit `ask allow` or
 | safe (read) | `approve` | Grant immediately. |
 | moderate (write) | `approve` or `escalate_human` | Judge decides based on context + tree. |
 | dangerous (delete/terminate) | `escalate_human` | Always routed to human. Judge can't override. |
-| context mismatch | `deny` | Action doesn't match declared session context. |
+| context mismatch | `deny_with_hint` | Action doesn't match declared session context. Agent told to `ask context` to update and retry. |
 | judge timeout/error | `deny` | Fail closed. Always. |
+| already granted | *(skip judge)* | Fast path: tree regex match, forward immediately (~1ms). |
 
 **Latency expectations:** With a local 3-8B model on decent hardware, safe actions resolve in <100ms. Moderate actions in <500ms. These are guidelines, not guarantees — depends entirely on your model and hardware. The hard timeout (`timeout_ms`) is the real contract.
 
@@ -215,14 +216,16 @@ Transparent MITM proxy. Session-scoped CA cert injected into sandbox at creation
 
 | Provider | Wire Format | Canonical Action |
 |----------|-------------|------------------|
-| AWS | `POST / Action=TerminateInstances` | `aws:ec2:TerminateInstances` |
-| GCP | `DELETE .../instances/{id}` | `gcp:compute.instances.delete` |
-| Azure | `DELETE .../Microsoft.Compute/...` | `az:Microsoft.Compute/delete` |
-| GitHub | `POST /repos/x/pulls` | `gh:repos/*/pulls:POST` |
-| K8s | `PATCH /apis/apps/v1/deployments` | `k8s:apps/v1/deployments:PATCH` |
+| AWS | `POST / Action=TerminateInstances` | `aws[profile=default]:ec2:TerminateInstances` |
+| GCP | `DELETE .../instances/{id}` | `gcp[project=myproj]:compute.instances.delete` |
+| Azure | `DELETE .../Microsoft.Compute/...` | `az[sub=abc123]:Microsoft.Compute/delete` |
+| GitHub | `POST /repos/x/pulls` | `gh[token=GITHUB_TOKEN]:repos/*/pulls:POST` |
+| K8s | `PATCH /apis/apps/v1/deployments` | `k8s[ctx=prod]:apps/v1/deployments:PATCH` |
 | Generic | `GET https://host/path` | `net:GET:host/path` |
 
 Parsers are pluggable. Unknown APIs fall back to `net:<METHOD>:<host>/<path>`.
+
+**Credential qualifier format:** `provider[key=value]:action`. The qualifier is derived from which credential mount the request uses (AWS profile name, GCP project, K8s context, etc.). This makes the permission tree credential-aware — `aws[profile=dev]:s3:GetObject` and `aws[profile=prod]:s3:GetObject` are distinct actions with distinct permissions. Generic `net:` actions have no qualifier.
 
 #### Baked-in Risk Taxonomy
 
@@ -308,11 +311,11 @@ This is the default flow. The agent just runs commands. No `ask` needed for the 
 Agent: aws s3 ls
   1. seccomp-notify fires on execve("aws") → allowed (binary ok)
   2. aws CLI → HTTPS request to s3.amazonaws.com
-  3. Proxy parses: aws:s3:ListBuckets
+  3. Proxy parses: aws[profile=dev]:s3:ListBuckets
   4. Tree check: not found
   5. Proxy submits implicit ask to judge:
-     {action: "aws:s3:ListBuckets", implicit: true, risk: "safe", ...}
-  6. Judge: approve, expand to aws:s3:List*
+     {action: "aws[profile=dev]:s3:ListBuckets", implicit: true, risk: "safe", ...}
+  6. Judge: approve, expand to aws[profile=dev]:s3:List*
   7. Permission added to tree
   8. Proxy forwards original request (no retry needed)
   9. Agent gets response as if nothing happened
@@ -328,12 +331,12 @@ Agent: aws s3 ls
 
 ### Explicit Pre-flight (ask allow)
 ```
-Agent: ask allow "aws:ec2:DescribeInstances"
+Agent: ask allow "aws[profile=dev]:ec2:DescribeInstances"
   1. ask CLI → Unix socket → daemon
   2. Daemon checks tree → not found
   3. Daemon queries taxonomy → safe (read-only)
   4. Daemon → judge: {action, tree, context, risk, implicit: false}
-  5. Judge: approve, expand to aws:ec2:Describe*
+  5. Judge: approve, expand to aws[profile=dev]:ec2:Describe*
   6. Added to tree → ✓ returned to CLI
   Total: < 200ms
 ```
@@ -354,8 +357,8 @@ Agent: ask plan "Rollback bad ECS deployment"
 ### State-Dependent Execution (point-of-use)
 ```
 Agent: aws ecs update-service --service api --desired-count 4
-  1. Proxy parses: aws:ecs:UpdateService
-  2. Tree match: p-002 (state-dependent, one-shot)
+  1. Proxy parses: aws[profile=prod]:ecs:UpdateService
+  2. Tree match: p-002 aws[profile=prod]:ecs:UpdateService (state-dependent, one-shot)
   3. Precondition check:
      a. Cached result for "runningCount >= 2"?
         - If within max_staleness (30s): use cached → PASS
@@ -370,11 +373,11 @@ Agent: aws ecs update-service --service api --desired-count 4
 
 ### Capability Discovery (ask what-can-i)
 ```
-Agent: ask what-can-i "aws:s3:*"
+Agent: ask what-can-i "aws[profile=dev]:s3:*"
   1. Returns current tree entries matching pattern
   2. No permission request submitted
-  3. Shows: aws:s3:List* (idempotent, active)
-           aws:s3:GetObject (idempotent, active)
+  3. Shows: aws[profile=dev]:s3:List* (idempotent, active)
+           aws[profile=dev]:s3:GetObject (idempotent, active)
   4. Agent knows what it has without round-trips
 ```
 
@@ -607,3 +610,4 @@ Section 1 (sandbox+daemon+proxy) ──→ Section 3 (judge) ──→ Section 5
 7. **Implicit ask rate limiting.** If an agent hammers unknown endpoints, the judge gets flooded. Need per-session rate limits on implicit asks, with a circuit breaker that falls back to explicit `ask` only.
 8. **Precondition composition.** Should preconditions support AND/OR logic, or keep it flat (all must pass)?
 9. **Judge prompt versioning.** System prompt changes alter security behavior. Need versioning + audit trail for judge prompt changes.
+10. **Moderate approval escalation threshold.** If the judge approves N moderate (state-changing) actions within a time window, should it auto-escalate to human review? A single model call approving unbounded writes is a lot of trust — a circuit breaker (e.g., >5 moderate approvals in 10 minutes → escalate next one) would cap exposure without slowing down normal usage.
