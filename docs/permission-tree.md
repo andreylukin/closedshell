@@ -1,6 +1,6 @@
 # Permission Tree Design — Cedar-Inspired Model
 
-**Decision:** Adopt Cedar's evaluation semantics (forbid-overrides-permit, default deny, order-independent) with ClosedShell-specific extensions for one-shot tokens, `when` conditions, and credential qualifiers.
+**Decision:** Adopt Cedar's evaluation semantics (forbid-overrides-permit, default deny, order-independent) with ClosedShell-specific extensions for one-shot tokens and credential qualifiers.
 
 ---
 
@@ -15,7 +15,7 @@ We evaluated AWS IAM, Cedar, Kubernetes RBAC, Zanzibar/SpiceDB, OPA/Rego, and ca
 | **Order-independent** | Policies are a set, not a chain | No subtle ordering bugs |
 | **Typed entities + schema** | Static validation before runtime | Catch bad permissions before they're used |
 | **No wildcards in entity IDs** | Deliberate restriction | Fast matching, analyzable |
-| **Conditions (when/unless)** | First-class | Maps directly to `when` conditions |
+| **Conditions (when/unless)** | First-class | Not used — judge re-evaluates per request instead |
 
 What we don't take from Cedar: its policy *language*. We don't need a DSL — permissions are created programmatically by the judge, human approvals, and the `ask` CLI. We take Cedar's **evaluation model** and **data model**.
 
@@ -52,11 +52,6 @@ rules:
     action: "aws[profile=prod]:ecs:UpdateService"
     type: one-shot
     approved_by: human:@oncall
-    when:
-      - cmd: "aws ecs describe-services --service api --profile prod"
-        jsonpath: ".services[0].runningCount"
-        expect: ">= 2"
-        max_staleness: "30s"
     plan_id: "plan-007"
     consumed: false
     expires: "2026-04-03T16:00:00Z"
@@ -71,7 +66,7 @@ rules:
 ### Key differences from current spec
 
 1. **`effect` field** — every rule is explicitly `permit` or `forbid` (Cedar's model). No implicit "everything is a permit."
-2. **`when` replaces `preconditions`** — aligns with Cedar's `when` clause terminology. Same semantics: conditions that must hold at point-of-use.
+2. **Two permit types only** — `idempotent` (persistent) and `one-shot` (consumed on use). No `state-dependent` type — if the judge wants to be conservative, it grants a one-shot and the agent re-asks when needed.
 3. **Forbid rules are first-class** — not just a deny response from the judge, but durable rules in the tree that can't be overridden.
 
 ---
@@ -98,26 +93,10 @@ evaluate(action) -> ALLOW | DENY(reason)
        b. If rule.type == one-shot:
             If rule.consumed → skip
             If expired → skip
-            If rule.when conditions exist → verify (see §3)
             Mark rule.consumed = true
             → return ALLOW
 
-       c. If rule.type == state-dependent:
-            If expired → skip
-            Verify rule.when conditions (see §3)
-            → return ALLOW
-
-3. WHEN VERIFICATION (point-of-use)
-   For each condition in rule.when:
-     Check cache: if result exists and age < max_staleness → use cached
-     Otherwise: execute cmd on host side (timeout: 5s)
-     Extract value via jsonpath
-     Evaluate expect expression
-     If any condition fails:
-       Auto-revoke the rule
-       → return DENY("precondition failed: {detail}")
-
-4. NO MATCH (implicit ask or default deny)
+3. NO MATCH (implicit ask or default deny)
    If implicit_ask enabled:
      Hold request → submit to judge
      Judge returns: approve | deny | escalate_human
@@ -133,7 +112,7 @@ evaluate(action) -> ALLOW | DENY(reason)
 - **Forbid always wins.** A forbid rule cannot be overridden by a permit, by the judge, or by human approval. It's a hard safety rail.
 - **Default deny.** No matching rule = denied.
 - **Order-independent.** Rules are evaluated as a set. The first matching forbid denies. Among permits, the first match wins (but any forbid would have already fired).
-- **Fail closed.** Judge timeout, `when` condition timeout, any error = deny.
+- **Fail closed.** Judge timeout, any error = deny.
 
 ---
 
@@ -278,21 +257,6 @@ Consumed on first use. Automatically removed from the tree after a single succes
   plan_id: "plan-007"
 ```
 
-### `state-dependent`
-
-Like idempotent, but with `when` conditions verified at point-of-use. Cached within `max_staleness` window. Auto-revoked if conditions fail.
-
-```yaml
-- effect: permit
-  action: "aws[profile=prod]:ecs:UpdateService"
-  type: state-dependent
-  when:
-    - cmd: "aws ecs describe-services --service api --profile prod"
-      jsonpath: ".services[0].runningCount"
-      expect: ">= 2"
-      max_staleness: "30s"
-```
-
 ### `forbid`
 
 Hard deny. No type field — forbids are always active for the session (or until explicitly removed by the operator, not the agent).
@@ -311,11 +275,52 @@ Hard deny. No type field — forbids are always active for the session (or until
 Forbid rules can come from multiple sources, in order of authority:
 
 1. **Org baseline** — Baked into config. Applied to every session. Cannot be removed within a session.
-2. **Session policy** — Set at `closedshell create` time via flags or config. Cannot be modified by the agent.
+2. **Session policy** — Set at `closedshell` start time via flags or config. Cannot be modified by the agent.
 3. **Human operator** — Added via `closedshell forbid` on the host side during a session.
 4. **Judge** — The judge can propose forbid rules (e.g., "this agent keeps trying to delete things, add a forbid"). Requires human confirmation.
 
 The agent **cannot** create forbid rules via `ask`. This is deliberate — the agent shouldn't be able to restrict its own permissions in a way that prevents recovery.
+
+### Org Baseline
+
+Forbid rules that apply to every session. Defined in the global config file (`~/.closedshell/config.yaml`) under `baseline_forbids`:
+
+```yaml
+# ~/.closedshell/config.yaml
+baseline_forbids:
+  - action: "aws[profile=prod]:*:Delete*"
+    reason: "org policy: no production deletes"
+  - action: "aws[profile=prod]:*:Terminate*"
+    reason: "org policy: no production terminates"
+```
+
+These are loaded before templates, cannot be removed by templates, the judge, the TUI rule editor, or the agent. They're tagged `source: org_baseline` and marked `# locked` in the editable rules file.
+
+---
+
+## Rule Metadata
+
+### `approved_by` format
+
+Tracks who authorized a permit rule:
+
+| Format | Meaning | Example |
+|--------|---------|---------|
+| `judge` | Auto-approved by judge | `approved_by: judge` |
+| `human:<id>` | Approved by a human operator | `approved_by: human:andrey` |
+| `template:<name>` | Loaded from a template | `approved_by: template:aws-debug` |
+
+The `<id>` in `human:<id>` is a free-form string set in config (`operator_id: andrey`). Defaults to the system username. Used for audit trail only — no auth system behind it.
+
+### `source` format (forbid rules)
+
+| Format | Meaning | Removable? |
+|--------|---------|------------|
+| `org_baseline` | From global config | No |
+| `session_policy` | From session flags/config | No |
+| `template:<name>` | From a template | No |
+| `human:<id>` | Added by operator during session | Yes (by operator only) |
+| `judge` | Proposed by judge, confirmed by human | Yes (by operator only) |
 
 ---
 
@@ -377,7 +382,7 @@ Validation checks:
 - Qualifier keys are valid for that provider
 - Operation matches at least one known pattern (warning if not — could be a new API)
 - Forbid rules on `dangerous` tier operations are flagged as expected
-- Permit rules on `dangerous` tier operations require `approved_by: human:*`
+- Permit rules on `dangerous` tier operations require `approved_by: human:<id>`
 
 ---
 
@@ -387,8 +392,6 @@ Validation checks:
 |---|---|---|
 | Forbid check | O(F) where F = forbid rule count | Typically < 10 rules. Linear scan is fine. |
 | Permit match (idempotent) | O(P) where P = permit rule count | Typically < 50 rules. Linear scan is fine. Index by provider prefix if needed. |
-| `when` check (cached) | O(1) | Hash lookup on condition key |
-| `when` check (fresh) | O(timeout) | Bounded by `check_timeout` (default 5s) |
 | Implicit ask (judge) | O(judge_latency) | Bounded by `timeout_ms` (default 5s) |
 
 For the expected session sizes (< 100 rules), linear scan with string matching is fast enough. No need for a trie or compiled regex engine. If sessions grow larger, index rules by `provider:service` prefix.
@@ -434,15 +437,19 @@ rules:
     type: idempotent
 ```
 
+### Storage
+
+Templates are YAML files in `~/.closedshell/templates/` (configurable via `templates_dir` in config). Each file is a template. The filename (minus `.yaml`) is the template name used with `--template`.
+
 ### Usage
 
 Templates are specified at session creation and merged in order:
 
 ```
-closedshell create \
+closedshell \
   --template aws-debug \
   --template github-readonly \
-  -- claude-code
+  pi
 ```
 
 Merge rules:
@@ -504,7 +511,7 @@ The agent sends a free-text description. The judge — not the agent's LLM — d
 Agent: ask plan "Rollback bad ECS deployment"
   1. ask CLI → daemon: {type: "plan", description: "Rollback bad ECS deployment"}
   2. Daemon → judge: {plan_description, current_tree, session_context, credentials_available}
-  3. Judge returns: proposed rules (permits with types, when conditions, risk levels)
+  3. Judge returns: proposed rules (permits with types and risk levels)
   4. Daemon validates rules against schema + existing forbids
   5. Safe actions → auto-approved, added to tree immediately
   6. Moderate/dangerous → queued for human approval
@@ -512,18 +519,6 @@ Agent: ask plan "Rollback bad ECS deployment"
   8. Agent starts working with auto-approved permissions immediately
   9. Human approves remaining via CLI/Slack → rules added to tree
   10. Implicit ask fills gaps at runtime if the plan didn't anticipate every action
-```
-
-### State-Dependent Execution (point-of-use)
-
-```
-Agent: aws ecs update-service --service api --desired-count 4
-  1. Proxy parses: aws[profile=prod]:ecs:UpdateService
-  2. Forbid check: no forbid matches
-  3. Permit match: p-002 (one-shot, has `when` conditions)
-  4. Verify `when` conditions (cached or fresh)
-  5. Conditions pass → forward request → mark p-002 consumed
-  Total: ~50ms (cached) to ~2s (fresh check)
 ```
 
 ### Capability Discovery (ask what-can-i)
@@ -536,10 +531,6 @@ Agent: ask what-can-i "aws[profile=dev]:s3:*"
            aws[profile=dev]:s3:GetObject (idempotent, active)
   4. Agent knows what it has without round-trips
 ```
-
-### Background Sweep
-
-Runs every 60s (configurable). Iterates state-dependent permissions, re-validates `when` conditions, auto-revokes stale grants. Cleanup only — not the enforcement boundary (point-of-use verification is).
 
 ### Denial UX
 
@@ -554,13 +545,11 @@ DENIED: aws:ec2:TerminateInstances (i-abc123)
   Run:  ask plan "describe your goal"
 ```
 
-**Precondition failure at point-of-use:**
+**One-shot consumed:**
 ```
-DENIED: aws:ecs:UpdateService (permission p-002 revoked)
+DENIED: aws:ecs:UpdateService (permission p-002 consumed)
 
-  Precondition failed: runningCount >= 2
-  Actual value: 1
-  Permission auto-revoked.
+  This was a one-shot permission and has been used.
 
   To re-request:  ask allow "aws:ecs:UpdateService"
 ```
@@ -574,7 +563,7 @@ DENIED: aws:ecs:UpdateService (permission p-002 revoked)
 | Effects | Allow-only (implicit) | Explicit `permit` / `forbid` |
 | Safety rails | Judge decides everything | Forbid rules are hard limits |
 | Action matching | Regex | Glob |
-| Conditions | `preconditions` | `when` (Cedar terminology) |
+| Conditions | `preconditions` | Removed — judge re-evaluates on each request |
 | Plan revocation | Not specified | Derivation tree — revoke plan = revoke all children |
 | Schema validation | Not specified | Compile-time validation against risk taxonomy |
 | Evaluation model | Check tree → ask judge → deny | Forbid check → permit check → implicit ask → deny |

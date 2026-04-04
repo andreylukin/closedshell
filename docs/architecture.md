@@ -111,23 +111,261 @@ Seatbelt controls which binaries can execute via `process-exec` rules. This is a
 ## Session Lifecycle
 
 ```
-closedshell create -- <agent-command>
+closedshell <agent-command>
 
-1. Generate session ID + session-scoped CA cert/key
-2. Write CA cert to sandbox tmpdir
-3. Generate seatbelt profile (.sb file)
-4. Start MITM proxy on localhost:8443
-5. Start Unix socket listener for `ask` CLI
-6. Exec:
+1. Lookup working directory in sessions.db → resume or create session
+2. Generate session-scoped CA cert/key (new session) or reuse session ID (resume)
+3. Write CA cert to sandbox tmpdir
+4. Generate seatbelt profile (.sb file)
+5. Start MITM proxy on localhost:8443
+6. Start Unix socket listener for `ask` CLI
+7. Exec:
    sandbox-exec -f /tmp/closedshell-XXXX/profile.sb \
      env HTTPS_PROXY=http://localhost:8443 \
          HTTP_PROXY=http://localhost:8443 \
          SSL_CERT_FILE=/tmp/closedshell-XXXX/ca.pem \
          CLOSEDSHELL_SOCKET=/tmp/closedshell-XXXX/ask.sock \
      -- <agent-command>
-7. Agent runs. All HTTPS → proxy. `ask` CLI → Unix socket.
-8. On exit: tear down proxy, remove tmpdir, clear permission tree.
+8. Print MOTD (if enabled)
+9. Open audit log: $PWD/closedshell-$SESSION_ID.log
+10. Agent runs. All HTTPS → proxy. `ask` CLI → Unix socket.
+11. On exit: tear down proxy, remove tmpdir. Permission tree + session metadata persisted to SQLite.
+   Log file persists.
 ```
+
+---
+
+## Session Management
+
+Sessions are identified by **working directory**. When `closedshell <cmd>` runs, it looks up the working directory in the session database. If a session exists for that directory, its permission tree is restored. If not, a new session is created.
+
+This maps to how coding agents like Pi work — sessions are per-project, and resuming a session in the same directory should feel like picking up where you left off, permissions included.
+
+### Storage
+
+```
+~/.closedshell/sessions.db    (SQLite)
+```
+
+```sql
+CREATE TABLE sessions (
+    id          TEXT PRIMARY KEY,       -- "8f3a-29c1"
+    workdir     TEXT NOT NULL UNIQUE,   -- working directory (one session per dir)
+    command     TEXT NOT NULL,          -- "pi", "claude-code", etc.
+    task        TEXT,                   -- current session task
+    status      TEXT NOT NULL,          -- "running", "stopped"
+    templates   TEXT,                   -- JSON array: ["aws-debug"]
+    pid         INTEGER,               -- daemon PID (detect crashes)
+    port        INTEGER NOT NULL,      -- proxy port
+    log_path    TEXT NOT NULL,          -- audit log path
+    created_at  TEXT NOT NULL,
+    last_used   TEXT NOT NULL,
+    total_decisions INTEGER DEFAULT 0,
+    total_denied    INTEGER DEFAULT 0
+);
+
+CREATE TABLE rules (
+    id          TEXT PRIMARY KEY,       -- rule ID: "p-001"
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    effect      TEXT NOT NULL,          -- "permit" or "forbid"
+    action      TEXT NOT NULL,          -- glob pattern
+    type        TEXT,                   -- "idempotent" or "one-shot"
+    rule_json   TEXT NOT NULL,          -- full rule as JSON
+    created_at  TEXT NOT NULL
+);
+```
+
+### Lifecycle
+
+```
+closedshell pi                         # start or resume
+  1. Hash $PWD → lookup in sessions.db
+  2. Existing session found?
+     YES → restore permission tree from rules table, reuse session ID, append to existing log
+     NO  → create new session, empty tree (+ templates if configured)
+  3. Start sandbox, proxy, socket (as before)
+  4. On exit:
+     - Persist current permission tree to rules table
+     - Update last_used, total_decisions, total_denied
+     - Set status = "stopped"
+     - Tear down proxy, remove tmpdir
+     - Log file persists
+```
+
+### CLI
+
+Three modes based on arguments:
+
+```
+closedshell                                     # TUI — session manager
+closedshell 8f3a                                # TUI — jump to specific session
+closedshell pi                                  # run agent in sandbox
+closedshell --task "fix bug" pi                 # with session task
+closedshell --template aws-debug pi             # with templates
+```
+
+Alias: `cs` (configured by user, not shipped).
+
+**How disambiguation works:** if the argument matches a known session ID prefix, open the TUI for that session. Otherwise, treat it as a command to sandbox. Session IDs are short hex strings — no collision with real commands.
+
+### Sandbox flags
+
+```
+closedshell [flags] <command> [args...]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--task <text>` | Set session task (used by judge for scope detection) |
+| `--template <name>` | Load permission template (repeatable) |
+| `--yolo` | Log-only mode — no blocking (see [§ YOLO Mode](#yolo-mode)) |
+| `--no-motd` | Suppress MOTD on start |
+| `--fresh` | Ignore existing session for this directory, start clean (new session ID, empty tree) |
+
+### TUI
+
+The TUI is the management interface. It runs in a separate terminal from the sandboxed agent.
+
+#### Session list (no args)
+
+```
+┌─ closedshell ─────────────────────────────────────────────┐
+│ Sessions                                                  │
+│  ● 8f3a  ~/repos/myproject     pi    2m ago   12 decisions│
+│  ○ c91b  ~/repos/other         pi    3h ago   47 decisions│
+│                                                           │
+│ [enter] select  [n] new  [d] delete  [r] reset  [q] quit │
+└───────────────────────────────────────────────────────────┘
+```
+
+`●` = running, `○` = stopped. Sorted by last activity.
+
+#### Session detail (select or `closedshell 8f3a`)
+
+Tabs: **live**, **rules**, **approvals**, **history**
+
+**Live tab** — streaming decisions in real time:
+
+```
+┌─ 8f3a ~/repos/myproject ──────────────────────────────────┐
+│ [l]ive  [r]ules  [a]pprovals  [h]istory                   │
+├───────────────────────────────────────────────────────────┤
+│ 14:32:01 ✓ aws[profile=dev]:s3:ListBuckets      template │
+│ 14:32:03 ✓ aws[profile=dev]:ec2:Describe*        judge   │
+│ 14:32:05 ✗ aws[profile=prod]:ec2:Terminate*      forbid  │
+│ 14:32:08 ? aws[profile=prod]:ecs:UpdateService   pending │
+│                                                           │
+│ [y] approve  [n] deny  [f] forbid  [e] edit rules        │
+└───────────────────────────────────────────────────────────┘
+```
+
+**Rules tab** — current permission tree:
+
+```
+┌─ 8f3a rules ──────────────────────────────────────────────┐
+│ FORBID                                                    │
+│  f-001  aws[profile=prod]:*:Delete*       (session policy)│
+│  f-002  aws[profile=prod]:*:Terminate*    (session policy)│
+│                                                           │
+│ PERMIT                                                    │
+│  p-001  aws[profile=*]:*:Describe*        idempotent      │
+│  p-002  aws[profile=*]:*:List*            idempotent      │
+│  p-003  aws[profile=prod]:ecs:Update*     one-shot (used) │
+│                                                           │
+│ [e] edit in $EDITOR  [f] add forbid  [d] delete rule      │
+└───────────────────────────────────────────────────────────┘
+```
+
+**Approvals tab** — pending human approvals:
+
+```
+┌─ 8f3a approvals ──────────────────────────────────────────┐
+│ PENDING (1)                                               │
+│  → aws[profile=prod]:ecs:UpdateService                    │
+│    risk: moderate | judge: escalate_human                  │
+│    plan: "rollback ECS deployment" (plan-013)              │
+│    waiting: 45s                                            │
+│                                                           │
+│ [y] approve  [n] deny  [i] inspect plan                   │
+└───────────────────────────────────────────────────────────┘
+```
+
+**History tab** — scrollable audit log:
+
+```
+┌─ 8f3a history ────────────────────────────────────────────┐
+│ 14:30:00 session_start  pi  templates: [aws-debug]        │
+│ 14:32:01 ✓ aws[profile=dev]:s3:ListBuckets      1ms      │
+│ 14:32:03 ✓ aws[profile=dev]:ec2:Describe*        87ms    │
+│ 14:32:05 ✗ aws[profile=prod]:ec2:Terminate*      0ms     │
+│ 14:32:08 ? aws[profile=prod]:ecs:UpdateService   pending │
+│                                                           │
+│ [/] search  [↑↓] scroll  [enter] detail                   │
+└───────────────────────────────────────────────────────────┘
+```
+
+#### Rule editing
+
+Pressing `e` on the rules tab opens `~/.closedshell/sessions/<id>/rules.yaml` in `$EDITOR`. The daemon watches the file and hot-reloads on save:
+
+1. User presses `e` → TUI writes current tree to `rules.yaml`, opens `$EDITOR`
+2. User edits rules (add forbids, remove permits, adjust globs)
+3. User saves and exits `$EDITOR`
+4. Daemon detects file change → validates against schema
+5. Valid → tree replaced, TUI shows updated rules
+6. Invalid → TUI shows validation errors, tree unchanged, offers to re-edit
+
+Forbid rules from org baseline or templates cannot be removed via edit — they're marked `# locked` in the file and the daemon rejects edits that remove them.
+
+#### TUI keybindings
+
+| Key | Context | Action |
+|-----|---------|--------|
+| `l` | session | switch to live tab |
+| `r` | session | switch to rules tab |
+| `a` | session | switch to approvals tab |
+| `h` | session | switch to history tab |
+| `y` | live/approvals | approve pending request |
+| `n` | live/approvals | deny pending request |
+| `f` | live/rules | add forbid rule (inline prompt) |
+| `e` | rules | edit rules in `$EDITOR` |
+| `d` | rules/sessions | delete rule / delete session |
+| `/` | history | search |
+| `q` | any | back / quit |
+
+### Crash recovery
+
+On startup, check for rows where `status = "running"` but `pid` is dead. Mark them `"stopped"`. Next `closedshell <cmd>` in that directory resumes normally.
+
+### One-shot rules across sessions
+
+One-shot rules that were consumed are deleted from the `rules` table on persist. Only unconsumed rules survive a session restart. Forbid rules and idempotent permits carry over.
+
+---
+
+## YOLO Mode
+
+`yolo: true` in config or `closedshell --yolo pi` on the command line. The proxy still intercepts and parses every request, but **never blocks**. All decisions are logged as `allow (yolo)`. The judge is not consulted. Forbid rules are still evaluated and logged as `would_deny (yolo)` but don't block.
+
+Use case: dev environments where you want visibility into what the agent is doing without friction. You can review the audit log after the fact and use it to build templates for production sessions.
+
+MOTD shows `[closedshell] mode: yolo` when active.
+
+---
+
+## MOTD
+
+Printed to stderr on sandbox start when `motd: true` (default). Tells the human (or agent) what's active:
+
+```
+[closedshell] session 8f3a-29c1 (resumed)
+[closedshell] task: investigate 503s in us-east-1
+[closedshell] templates: aws-debug, github-readonly
+[closedshell] permits: 6 | forbids: 2
+[closedshell] log: ./closedshell-8f3a-29c1.log
+```
+
+New sessions show `(new)` instead of `(resumed)`. Kept terse — one line per fact, no box drawing, no instructions. Agents that parse stderr can ignore the `[closedshell]` prefix.
 
 ---
 
@@ -143,6 +381,7 @@ Unix socket, newline-delimited JSON. One request, one response. No streaming, no
 {"type": "why_denied"}
 {"type": "allow", "action": "aws[profile=dev]:ec2:DescribeInstances"}
 {"type": "plan", "description": "rollback ECS deployment in us-east-1"}
+{"type": "context", "task": "now rolling back ECS deployment"}
 {"type": "read", "path": "/Users/andrey/repos/myproject/src/main.rs"}
 {"type": "write", "path": "/Users/andrey/repos/myproject/out.json", "content": "..."}
 ```
@@ -160,6 +399,7 @@ Unix socket, newline-delimited JSON. One request, one response. No streaming, no
 - `why_denied` → `{"action": "...", "reason": "...", "risk_tier": "...", "hint": "..."}`
 - `allow` → `{"rule": {...}}` (the granted rule) or error
 - `plan` → `{"plan_id": "...", "auto_approved": [...], "pending_human": [...]}`
+- `context` → `{"task": "..."}` (updated session context)
 - `read` → `{"content": "..."}` or error
 - `write` → `{"bytes_written": N}` or error
 
@@ -171,6 +411,136 @@ Unix socket, newline-delimited JSON. One request, one response. No streaming, no
 | `pending_approval` | Queued for human approval, not yet resolved |
 | `invalid_request` | Malformed request |
 | `internal_error` | Daemon-side failure |
+
+---
+
+## Audit Log
+
+Newline-delimited JSON file written to the working directory: `closedshell-<session-id>.log`. Persists after session ends. One line per event.
+
+The agent can read this file (seatbelt allows reads) — that's fine per the threat model.
+
+### Events
+
+Every proxy decision and `ask` CLI interaction produces a log entry. Common envelope:
+
+```json
+{
+  "ts": "2026-04-04T14:32:01.003Z",
+  "session": "8f3a-29c1",
+  "event": "...",
+  ...
+}
+```
+
+### Event types
+
+**`decision`** — every allow/deny through the proxy or `ask` CLI:
+
+```json
+{
+  "ts": "2026-04-04T14:32:01.003Z",
+  "session": "8f3a-29c1",
+  "event": "decision",
+  "action": "aws[profile=dev]:s3:ListBuckets",
+  "result": "allow",
+  "decided_by": "template:aws-debug",
+  "rule_id": "p-001",
+  "latency_ms": 1,
+  "request": {
+    "method": "GET",
+    "host": "s3.amazonaws.com",
+    "path": "/"
+  }
+}
+```
+
+```json
+{
+  "ts": "2026-04-04T14:32:05.187Z",
+  "session": "8f3a-29c1",
+  "event": "decision",
+  "action": "aws[profile=prod]:ec2:TerminateInstances",
+  "result": "deny",
+  "decided_by": "forbid:f-002",
+  "reason": "session policy: no production terminates",
+  "request": {
+    "method": "POST",
+    "host": "ec2.amazonaws.com",
+    "path": "/",
+    "params": {"Action": "TerminateInstances", "InstanceId.1": "i-abc123"}
+  }
+}
+```
+
+**`judge`** — every judge invocation (implicit ask or explicit):
+
+```json
+{
+  "ts": "2026-04-04T14:32:03.450Z",
+  "session": "8f3a-29c1",
+  "event": "judge",
+  "action": "aws[profile=dev]:ec2:DescribeInstances",
+  "decision": "approve",
+  "risk_tier": "safe",
+  "latency_ms": 87,
+  "implicit": true
+}
+```
+
+**`plan`** — plan submitted and processed:
+
+```json
+{
+  "ts": "2026-04-04T14:35:00.000Z",
+  "session": "8f3a-29c1",
+  "event": "plan",
+  "plan_id": "plan-013",
+  "description": "rollback ECS deployment",
+  "auto_approved": 2,
+  "pending_human": 1
+}
+```
+
+**`context`** — session task updated via `ask context`:
+
+```json
+{
+  "ts": "2026-04-04T14:40:00.000Z",
+  "session": "8f3a-29c1",
+  "event": "context",
+  "old_task": "investigate 503s in us-east-1",
+  "new_task": "rollback ECS deployment"
+}
+```
+
+**`lifecycle`** — session start/end:
+
+```json
+{"ts": "...", "session": "8f3a-29c1", "event": "session_start", "command": "claude-code", "templates": ["aws-debug"]}
+{"ts": "...", "session": "8f3a-29c1", "event": "session_end", "duration_s": 1823, "total_decisions": 47, "denied": 3}
+```
+
+**`file_io`** — `ask read` / `ask write` operations:
+
+```json
+{
+  "ts": "2026-04-04T14:33:00.000Z",
+  "session": "8f3a-29c1",
+  "event": "file_io",
+  "op": "write",
+  "path": "/Users/andrey/repos/myproject/out.json",
+  "result": "allow",
+  "bytes": 1024,
+  "decided_by": "p-003"
+}
+```
+
+### What's NOT logged
+
+- Request/response bodies (storage/privacy concern — add in a future `verbose` mode if needed)
+- Direct file reads by the agent (`cat`, etc.) — seatbelt allows these, they bypass the daemon entirely
+- Sandbox-internal activity (tmpdir writes, process execution)
 
 ---
 
@@ -245,16 +615,16 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | P2 | Agent runs `aws s3 ls` through proxy (no permission in tree) | Proxy parses `aws[profile=...]:s3:ListBuckets`, returns deny (no judge yet in Section 1) |
 | P3 | Manually add `permit aws[profile=*]:s3:List*` to tree, re-run `aws s3 ls` | Proxy matches permit, forwards request, agent gets bucket list |
 | P4 | Agent makes request to unknown host | Proxy parses as `net:METHOD:host/path`, returns deny |
-| P5 | Verify session CA is unique per session | Two `closedshell create` invocations produce different CA fingerprints |
+| P5 | Verify session CA is unique per session | Two `closedshell` invocations with `sessions reset` between produce different CA fingerprints |
 | P6 | Verify upstream TLS works | Proxy connects to real upstream with system trust store (not session CA) |
 
 ### Session Lifecycle
 
 | # | Test | Pass condition |
 |---|------|---------------|
-| L1 | `closedshell create -- /bin/sh` | Sandbox starts, proxy listening, Unix socket exists, MOTD displayed |
+| L1 | `closedshell /bin/sh` | Sandbox starts, proxy listening, Unix socket exists, MOTD displayed |
 | L2 | Agent exits | Proxy stops, tmpdir removed, socket gone |
-| L3 | `closedshell create` with credential mounts | `~/.aws/credentials` readable inside sandbox, env vars set |
+| L3 | `closedshell pi` with credential mounts in config | `~/.aws/credentials` readable inside sandbox, env vars set |
 | L4 | Kill daemon while agent is running | Agent's next network call fails cleanly (connection refused, not hang) |
 
 ### `ask` CLI + IPC
@@ -274,9 +644,7 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | T2 | No rules → evaluate any action | DENY (default deny) |
 | T3 | Permit `aws[profile=dev]:ec2:Describe*` (idempotent) → evaluate twice | ALLOW both times, rule still in tree |
 | T4 | Permit one-shot → evaluate twice | First ALLOW, second DENY (consumed) |
-| T5 | State-dependent with `when` condition → condition passes | ALLOW |
-| T6 | State-dependent with `when` condition → condition fails | DENY, rule auto-revoked |
-| T7 | `when` condition with cached result within `max_staleness` | Uses cache, no re-execution |
+| T5 | One-shot consumed → same action re-evaluated | DENY (consumed) |
 | T8 | Glob `aws[profile=*]:s3:List*` matches `aws[profile=dev]:s3:ListBuckets` | Match |
 | T9 | Glob `aws[profile=dev]:s3:List*` does NOT match `aws[profile=prod]:s3:ListBuckets` | No match |
 | T10 | Template merge: two templates loaded, forbid from first cannot be removed by second | Forbid persists |
@@ -317,7 +685,6 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | Syscall filtering | seccomp-bpf (Linux) / seatbelt (macOS) | Kernel-level |
 | Network egress | All traffic forced through proxy | No network without proxy |
 | API enforcement | L7 proxy parsing + permission tree | Catches all HTTP |
-| `when` condition enforcement | Point-of-use verification in proxy | No stale-grant window |
 | Credential isolation | Mounted in sandbox, but proxy enforces | Agent can't bypass proxy |
 | Judge isolation | Structured input only, single model | Agent can't prompt-inject judge |
 | Judge failure mode | Timeout/error = deny | Fail closed, always |

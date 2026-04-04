@@ -32,6 +32,65 @@ judge:
 
 ---
 
+## Judge Context
+
+Every judge call includes the same context envelope. The daemon builds this — the agent never touches it.
+
+### Session context
+
+Set at `closedshell --task "investigate 503s" pi`. Updated by the agent via `ask context "now rolling back ECS"`. The judge uses this to detect scope creep — an agent investigating 503s shouldn't be deleting S3 buckets.
+
+```json
+"session_context": {
+  "task": "investigate 503s in us-east-1",
+  "created": "2026-04-04T10:00:00Z",
+  "credentials_available": ["aws:profile=prod", "aws:profile=dev"]
+}
+```
+
+### `ask context` behavior
+
+When the agent runs `ask context "new task description"`:
+
+1. Daemon updates the session task field
+2. Logged as a `context` event in the audit log (old and new task)
+3. All future judge calls include the updated task
+
+Context updates are **informational only**. Existing permits are not re-evaluated or revoked. The judge sees the new context on its next invocation and can factor it into future decisions — but the tree stays as-is. If existing permissions no longer make sense, that's a host-side action (`closedshell revoke-plan` or adding a forbid).
+
+This keeps the design simple: `ask context` is a cheap metadata update, not a tree mutation trigger.
+
+### Current tree
+
+The full set of active permit and forbid rules. Lets the judge see what's already been granted and avoid redundant approvals.
+
+### Decision history
+
+Last 20 decisions, compact format. Gives the judge signal for pattern detection — escalation sequences, scope creep, repeated denial attempts.
+
+```json
+"history": [
+  {"action": "aws[profile=dev]:s3:List*", "decision": "approve", "by": "judge", "t": -300},
+  {"action": "aws[profile=dev]:ec2:Describe*", "decision": "approve", "by": "judge", "t": -240},
+  {"action": "aws[profile=prod]:ecs:UpdateService", "decision": "escalate_human", "by": "judge", "t": -60},
+  {"action": "aws[profile=prod]:s3:DeleteBucket", "decision": "deny", "by": "judge", "t": -30}
+]
+```
+
+- `t` — seconds relative to now (negative = past). Avoids clock sync issues, cheap to compute.
+- `by` — who made the decision: `judge`, `human:@oncall`, `template:aws-debug`, `forbid`.
+- Capped at 20 entries. Oldest dropped first. If sessions need deeper history, the audit log has everything — the judge gets a rolling window.
+
+**What the judge can infer from history:**
+- Progressive escalation (dev → prod, read → write → delete)
+- Repeated denial variants (agent keeps trying `Delete*` with different resources)
+- Velocity (15 approvals in 5 minutes vs 2 in an hour)
+- Context drift (started with S3, now touching ECS, IAM, Lambda)
+
+**What history is NOT:** a trust score. The judge doesn't "warm up" to an agent. Each decision is independent, informed by history but not determined by it.
+
+---
+
 ## Judge Input (structured)
 
 ```json
@@ -39,13 +98,19 @@ judge:
   "requested_action": "aws[profile=prod]:ecs:UpdateService",
   "current_tree": ["aws[profile=prod]:ecs:Describe*", "aws[profile=prod]:ecs:List*"],
   "session_context": {"task": "investigate 503s in us-east-1"},
-  "provider_risk_tier": "moderate",
-  "action_taxonomy": "state-change",
+  "history": [
+    {"action": "aws[profile=dev]:s3:List*", "decision": "approve", "by": "judge", "t": -300},
+    {"action": "aws[profile=dev]:ec2:Describe*", "decision": "approve", "by": "judge", "t": -240}
+  ],
+  "risk_tier": "moderate",
   "implicit": true
 }
 ```
 
-The `implicit` field indicates whether this came from an explicit `ask allow` or from an implicit ask via the proxy. The judge may use this signal (e.g., require `ask plan` for dangerous actions even if the agent just tried to run them).
+Fields:
+- `risk_tier` — `safe`, `moderate`, or `dangerous`. Derived from the baked-in risk taxonomy (see [proxy.md § Risk Taxonomy](proxy.md#baked-in-risk-taxonomy)). Tells the judge the provider's own classification of this action.
+- `implicit` — whether this came from an explicit `ask allow` or from an implicit ask via the proxy. The judge may use this signal (e.g., require `ask plan` for dangerous actions even if the agent just tried to run them).
+- `credentials_available` in `session_context` — derived from credential mounts in config. Tells the judge which providers/profiles are available, so it can scope permits correctly.
 
 ---
 
@@ -56,10 +121,7 @@ The `implicit` field indicates whether this came from an explicit `ask allow` or
   "decision": "escalate_human",
   "risk_level": "moderate",
   "reasoning": "UpdateService is a state change on production ECS",
-  "proposed_expansion": ["aws[profile=prod]:ecs:UpdateService (one-shot, with when conditions)"],
-  "suggested_when": [
-    {"cmd": "aws ecs describe-services ...", "expect": "runningCount >= 2", "max_staleness": "30s"}
-  ]
+  "proposed_expansion": ["aws[profile=prod]:ecs:UpdateService (one-shot)"]
 }
 ```
 
@@ -86,13 +148,15 @@ The judge decomposes a free-text plan description into a minimal permission set.
 
 ### Input
 
+Same context envelope as all judge calls, plus the plan description:
+
 ```json
 {
   "type": "plan",
   "description": "rollback ECS deployment in us-east-1",
   "current_tree": ["aws[profile=prod]:ecs:Describe*", "aws[profile=prod]:ecs:List*"],
-  "session_context": {"task": "investigate 503s in us-east-1"},
-  "credentials_available": ["aws:profile=prod", "aws:profile=dev"]
+  "session_context": {"task": "investigate 503s in us-east-1", "credentials_available": ["aws:profile=prod", "aws:profile=dev"]},
+  "history": [...]
 }
 ```
 
@@ -119,9 +183,6 @@ The judge decomposes a free-text plan description into a minimal permission set.
       "action": "aws[profile=prod]:ecs:UpdateService",
       "type": "one-shot",
       "risk_level": "moderate",
-      "suggested_when": [
-        {"cmd": "aws ecs describe-services --service api --profile prod", "jsonpath": ".services[0].runningCount", "expect": ">= 2", "max_staleness": "30s"}
-      ]
     }
   ],
   "reasoning": "rollback requires reading current state (Describe) and updating the service to a previous task definition (UpdateService). Scoped to one-shot with running count guard."

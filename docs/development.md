@@ -16,9 +16,9 @@ Everything that makes the sandbox work end-to-end. This is one integrated delive
 - Provider parsers (generic `net:METHOD:host/path` first, then AWS/GCP/etc.) — see [proxy.md](proxy.md)
 - Credential mounts (file, env, socket, oauth with daemon-side refresh) — see [proxy.md](proxy.md)
 - Tree lookup on every request — unknown = deny (no judge yet)
-- `closedshell create -- <cmd>` lifecycle
+- `closedshell <cmd>` lifecycle + session persistence (SQLite)
 
-**Deliverable:** A locked sandbox where all network traffic is intercepted, parsed, and checked against the permission tree. End-to-end from `closedshell create` to denied/approved request.
+**Deliverable:** A locked sandbox where all network traffic is intercepted, parsed, and checked against the permission tree. End-to-end from `closedshell pi` to denied/approved request.
 
 ---
 
@@ -29,7 +29,7 @@ Standalone, fully unit-testable data structure. No system dependencies — can s
 **Scope:**
 - In-memory permission store, session-scoped
 - Cedar-inspired evaluation: forbid-overrides-permit, default deny
-- Permission types: idempotent, one-shot, state-dependent
+- Permission types: idempotent, one-shot
 - Glob matching, expiry, consumption logic
 - Schema validation against risk taxonomy
 - CRUD via internal API
@@ -53,33 +53,21 @@ Plugs into the proxy to make real permission decisions. Design: [judge.md](judge
 
 ---
 
-## Section 4: Human Approval
+## Section 4: TUI + Human Approval
 
-Escalation path for actions the judge won't auto-approve.
+The management interface and escalation path. The TUI replaces ad-hoc host-side CLI commands. See [architecture.md § TUI](architecture.md#tui).
 
 **Scope:**
-- Pending approval queue in daemon
-- `closedshell approvals` host-side CLI
+- TUI with session list + session detail (live, rules, approvals, history tabs)
+- Pending approval queue in daemon, surfaced in TUI approvals tab
+- Approve/deny pending requests from TUI
+- Rule editing via `$EDITOR` with hot-reload
+- Add forbid rules inline from TUI
 - Auto-approve timeouts per risk tier
 - Webhook support (Slack, PagerDuty, custom endpoint)
 - Plan context shown to approvers
 
-**Deliverable:** `escalate_human` decisions route to a human and block until resolved.
-
----
-
-## Section 5: `when` Conditions
-
-The most complex permission type — touches proxy, tree, and host-side execution. See [permission-tree.md § When Verification](permission-tree.md#evaluation-algorithm).
-
-**Scope:**
-- Point-of-use `when` condition verification in proxy (before forwarding request)
-- Cached results with configurable `max_staleness`
-- Background sweep for cleanup (not enforcement)
-- Host-side condition command execution with hard timeout
-- Auto-revoke on condition failure
-
-**Deliverable:** State-dependent permissions fully enforced. `when` conditions verified at point-of-use, cached intelligently, cleaned up in background.
+**Deliverable:** `closedshell` (no args) opens a TUI. Human can watch decisions live, approve/deny escalations, and edit rules. `escalate_human` decisions block until resolved via TUI or webhook.
 
 ---
 
@@ -88,12 +76,12 @@ The most complex permission type — touches proxy, tree, and host-side executio
 ```
 Section 2 (permission tree) ── starts day one, consumed by Section 1
 
-Section 1 (sandbox+daemon+proxy) ──→ Section 3 (judge) ──→ Section 5 (when conditions)
-                                 ──→ Section 4 (human approval)
+Section 1 (sandbox+daemon+proxy) ──→ Section 3 (judge)
+                                 ──→ Section 4 (TUI + human approval)
 ```
 
 ## Recommended Build Order (solo dev)
 
 1. **Section 1 + Section 2** in parallel
 2. **Section 3** (judge — proxy becomes useful)
-3. **Section 4 + Section 5** in parallel
+3. **Section 4** (TUI + human approval)

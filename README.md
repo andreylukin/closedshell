@@ -43,7 +43,7 @@ This means ClosedShell is lightweight enough to actually use. No VM boot times, 
 └─────────────────────────────────────────────┘
 ```
 
-1. Agent runs inside a sandboxed shell (`closedshell create -- claude-code`)
+1. Agent runs inside a sandboxed shell (`closedshell pi`)
 2. All outbound HTTPS is intercepted by a MITM proxy
 3. Proxy parses API calls into canonical actions (`aws[profile=dev]:s3:ListBuckets`)
 4. Actions are checked against a **permission tree** — forbid-overrides-permit, default deny
@@ -57,7 +57,7 @@ This means ClosedShell is lightweight enough to actually use. No VM boot times, 
 
 ### Permission Tree
 
-Cedar-inspired evaluation: **forbid-overrides-permit, default deny, order-independent.** Rules are `permit` or `forbid`. Three permit types: `idempotent`, `one-shot`, `state-dependent`. Glob pattern matching with credential qualifiers (`aws[profile=prod]:ecs:UpdateService`).
+Cedar-inspired evaluation: **forbid-overrides-permit, default deny, order-independent.** Rules are `permit` or `forbid`. Two permit types: `idempotent` (persistent) and `one-shot` (consumed on use). Glob pattern matching with credential qualifiers (`aws[profile=prod]:ecs:UpdateService`).
 
 ### Judge
 
@@ -72,6 +72,8 @@ ask allow <action>            # request single permission
 ask plan "<description>"      # batch approval via judge
 ask status                    # show current permissions
 ask what-can-i "<pattern>"    # query without requesting
+ask why-denied               # show last denial reason + hint
+ask context "<description>"  # update session task (judge uses this for scope)
 ask read <path>               # read file (audited, permission-checked)
 ask write <path> [content]    # write file outside sandbox (permission-checked)
 ```
@@ -123,9 +125,22 @@ Ships as two static binaries: `closedshell` (host) and `ask` (sandbox).
 
 ```yaml
 # closedshell.yaml
+# Lookup order: ./closedshell.yaml → ~/.closedshell/config.yaml
+# Per-directory config overrides global. CLI flags override both.
+
 sandbox:
-  motd: true
-  implicit_ask: true
+  motd: true                # show session info on start
+  implicit_ask: true        # proxy auto-consults judge for unknown actions
+  yolo: false               # log-only mode — no blocking
+
+  # Process exec allowlist (added to seatbelt profile)
+  exec_allowlist:
+    - /bin/sh
+    - /bin/bash
+    - /usr/bin/env
+    - /usr/local/bin/aws
+    # agent-specific binaries added automatically
+
   credentials:
     - type: file
       source: ~/.aws/credentials
@@ -133,6 +148,15 @@ sandbox:
       readonly: true
     - type: env
       vars: [OPENAI_API_KEY, GITHUB_TOKEN]
+    - type: socket
+      source: $SSH_AUTH_SOCK
+      mount: /tmp/ssh-agent.sock
+    - type: oauth
+      provider: gcp
+      token_path: ~/.config/gcloud/
+      refresh_interval: 45m
+
+  templates_dir: ~/.closedshell/templates   # where to find .yaml template files
 
 judge:
   api_base: "http://localhost:11434/v1"
@@ -140,15 +164,16 @@ judge:
   api_key: ""
   timeout_ms: 5000
   temperature: 0.0
+  system_prompt_path: ~/.closedshell/judge-system.txt
 
 approval:
   auto_approve_timeout:
-    moderate: "30s"
-    dangerous: null   # never auto-approve
-  webhook_url: ""
+    moderate: "30s"         # auto-DENY after timeout (not auto-approve)
+    dangerous: null         # null = wait forever for human
+  webhook_url: ""           # POST {action, risk, plan_id, session} on escalation
 ```
 
-Full config reference in the individual docs above.
+Config lookup: `./closedshell.yaml` in the working directory first, then `~/.closedshell/config.yaml` as global default. CLI flags override both. See individual docs for field details.
 
 ---
 
@@ -156,9 +181,4 @@ Full config reference in the individual docs above.
 
 1. **Judge training data.** Bootstrap from IAM taxonomy + synthetic sessions, then learn from real usage?
 2. **Multi-agent.** Shared permission tree or separate sandboxes with cross-sandbox communication?
-3. **Escape hatch.** "YOLO mode" that logs everything but blocks nothing for dev environments?
-4. **Plan branching.** "If X then Y else Z" — how does the judge approve conditional plans?
-5. **Implicit ask rate limiting.** Circuit breaker that falls back to explicit `ask` only after too many judge calls.
-6. **`when` condition composition.** Should `when` conditions support AND/OR logic, or keep it flat (all must pass)?
-7. **Judge prompt versioning.** System prompt changes alter security behavior. Need versioning + audit trail.
-8. **Moderate approval escalation threshold.** Auto-escalate to human after N moderate approvals in a time window.
+3. **Plan branching.** "If X then Y else Z" — how does the judge approve conditional plans?

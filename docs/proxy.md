@@ -9,11 +9,10 @@ Transparent MITM proxy. Session-scoped CA cert injected into sandbox at creation
 - Intercept all outbound HTTPS from sandbox
 - Parse cloud provider API calls into structured actions
 - Check action against permission tree (forbid → permit → implicit ask → deny). See [permission-tree.md § Evaluation Algorithm](permission-tree.md#evaluation-algorithm).
-- For state-dependent permissions: run point-of-use [`when` condition verification](permission-tree.md#evaluation-algorithm) before forwarding (cached within `max_staleness`, host-side execution, timeout = deny)
 - For unknown actions: submit implicit ask to judge
-- Inject credentials from vault into approved requests
-- Log all allow/deny decisions with full request metadata
-- Support WebSocket/streaming (no hardcoded timeouts)
+- Forward approved requests with credentials as-is (passthrough — see [§ Credential Passthrough](#credential-passthrough))
+- Log all decisions to audit log (see [architecture.md § Audit Log](architecture.md#audit-log))
+- Support WebSocket/streaming (see [§ Streaming and WebSocket](#streaming-and-websocket))
 
 ---
 
@@ -43,6 +42,32 @@ Parsers are pluggable. Unknown APIs fall back to `net:<METHOD>:<host>/<path>`.
 Safe/moderate/dangerous classification per provider, sourced from public IAM/RBAC docs. Embedded in binary, updatable via config override. Used for both judge input and permission tree schema validation.
 
 See [permission-tree.md § Schema](permission-tree.md#schema-compile-time-validation) for the full taxonomy format.
+
+---
+
+## Streaming and WebSocket
+
+The proxy makes the allow/deny decision on the **initial request only**, then becomes a dumb pipe for the data phase.
+
+### HTTP streaming (chunked, SSE)
+
+1. Proxy intercepts the request, parses action, checks permission tree — same as any other request
+2. If denied → return 403 immediately, no upstream connection
+3. If allowed → establish upstream connection, stream response chunks through to the agent untouched
+4. No per-chunk inspection or re-checking
+
+### WebSocket
+
+1. Proxy intercepts the HTTP `Upgrade` request, parses action from the URL/headers
+2. Permission check on the upgrade request — one check at connect time
+3. If denied → return 403, no upgrade
+4. If allowed → complete the upgrade, then relay frames bidirectionally without inspection
+
+### Revocation during a stream
+
+If a permission is revoked (plan revoked, one-shot consumed by another request) while a streaming connection or WebSocket is already open, **the existing connection is not interrupted**. The revocation takes effect on the next connection attempt.
+
+This is an acceptable gap. The alternative — tracking all open connections per rule and tearing them down on revocation — adds significant complexity for marginal security benefit. Long-lived connections are rare in the cloud API use case (most are short request/response), and WebSocket connections get a fresh check on reconnect.
 
 ---
 
