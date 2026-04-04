@@ -68,7 +68,7 @@ Escalation path for actions the judge won't auto-approve.
 
 ---
 
-## Section 5: Preconditions (`when` conditions)
+## Section 5: `when` Conditions
 
 The most complex permission type — touches proxy, tree, and host-side execution. See [permission-tree.md § When Verification](permission-tree.md#evaluation-algorithm).
 
@@ -88,7 +88,7 @@ The most complex permission type — touches proxy, tree, and host-side executio
 ```
 Section 2 (permission tree) ── starts day one, consumed by Section 1
 
-Section 1 (sandbox+daemon+proxy) ──→ Section 3 (judge) ──→ Section 5 (preconditions)
+Section 1 (sandbox+daemon+proxy) ──→ Section 3 (judge) ──→ Section 5 (when conditions)
                                  ──→ Section 4 (human approval)
 ```
 

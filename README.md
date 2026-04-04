@@ -95,7 +95,7 @@ Ships as two static binaries: `closedshell` (host) and `ask` (sandbox).
 | Doc | What's in it |
 |-----|-------------|
 | [docs/architecture.md](docs/architecture.md) | Platform sandbox design (macOS Seatbelt + proxy, Linux namespaces), security boundaries |
-| [docs/permission-tree.md](docs/permission-tree.md) | Cedar-inspired permission model, evaluation algorithm, action format, templates, flows, denial UX |
+| [docs/permission-tree.md](docs/permission-tree.md) | Cedar-inspired permission model, evaluation algorithm, action format, [templates](docs/permission-tree.md#templates), flows, denial UX |
 | [docs/judge.md](docs/judge.md) | Judge config, structured I/O, decision matrix |
 | [docs/proxy.md](docs/proxy.md) | HTTPS proxy, provider parsers, credential qualifier format, credential mounts |
 | [docs/development.md](docs/development.md) | Build sections, dependency graph, recommended build order |
@@ -141,8 +141,7 @@ Full config reference in the individual docs above.
 2. **Multi-agent.** Shared permission tree or separate sandboxes with cross-sandbox communication?
 3. **Escape hatch.** "YOLO mode" that logs everything but blocks nothing for dev environments?
 4. **Plan branching.** "If X then Y else Z" — how does the judge approve conditional plans?
-5. **Permission templates.** Pre-built starter sets per workflow type (k8s-debug, aws-deploy, etc.)?
-6. **Implicit ask rate limiting.** Circuit breaker that falls back to explicit `ask` only after too many judge calls.
-7. **Precondition composition.** Should `when` conditions support AND/OR logic, or keep it flat (all must pass)?
-8. **Judge prompt versioning.** System prompt changes alter security behavior. Need versioning + audit trail.
-9. **Moderate approval escalation threshold.** Auto-escalate to human after N moderate approvals in a time window.
+5. **Implicit ask rate limiting.** Circuit breaker that falls back to explicit `ask` only after too many judge calls.
+6. **`when` condition composition.** Should `when` conditions support AND/OR logic, or keep it flat (all must pass)?
+7. **Judge prompt versioning.** System prompt changes alter security behavior. Need versioning + audit trail.
+8. **Moderate approval escalation threshold.** Auto-escalate to human after N moderate approvals in a time window.

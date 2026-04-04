@@ -1,6 +1,6 @@
 # Permission Tree Design — Cedar-Inspired Model
 
-**Decision:** Adopt Cedar's evaluation semantics (forbid-overrides-permit, default deny, order-independent) with ClosedShell-specific extensions for one-shot tokens, preconditions, and credential qualifiers.
+**Decision:** Adopt Cedar's evaluation semantics (forbid-overrides-permit, default deny, order-independent) with ClosedShell-specific extensions for one-shot tokens, `when` conditions, and credential qualifiers.
 
 ---
 
@@ -15,7 +15,7 @@ We evaluated AWS IAM, Cedar, Kubernetes RBAC, Zanzibar/SpiceDB, OPA/Rego, and ca
 | **Order-independent** | Policies are a set, not a chain | No subtle ordering bugs |
 | **Typed entities + schema** | Static validation before runtime | Catch bad permissions before they're used |
 | **No wildcards in entity IDs** | Deliberate restriction | Fast matching, analyzable |
-| **Conditions (when/unless)** | First-class | Maps directly to preconditions |
+| **Conditions (when/unless)** | First-class | Maps directly to `when` conditions |
 
 What we don't take from Cedar: its policy *language*. We don't need a DSL — permissions are created programmatically by the judge, human approvals, and the `ask` CLI. We take Cedar's **evaluation model** and **data model**.
 
@@ -133,7 +133,7 @@ evaluate(action) -> ALLOW | DENY(reason)
 - **Forbid always wins.** A forbid rule cannot be overridden by a permit, by the judge, or by human approval. It's a hard safety rail.
 - **Default deny.** No matching rule = denied.
 - **Order-independent.** Rules are evaluated as a set. The first matching forbid denies. Among permits, the first match wins (but any forbid would have already fired).
-- **Fail closed.** Judge timeout, precondition timeout, any error = deny.
+- **Fail closed.** Judge timeout, `when` condition timeout, any error = deny.
 
 ---
 
@@ -312,8 +312,8 @@ Validation checks:
 |---|---|---|
 | Forbid check | O(F) where F = forbid rule count | Typically < 10 rules. Linear scan is fine. |
 | Permit match (idempotent) | O(P) where P = permit rule count | Typically < 50 rules. Linear scan is fine. Index by provider prefix if needed. |
-| Precondition check (cached) | O(1) | Hash lookup on condition key |
-| Precondition check (fresh) | O(timeout) | Bounded by `check_timeout` (default 5s) |
+| `when` check (cached) | O(1) | Hash lookup on condition key |
+| `when` check (fresh) | O(timeout) | Bounded by `check_timeout` (default 5s) |
 | Implicit ask (judge) | O(judge_latency) | Bounded by `timeout_ms` (default 5s) |
 
 For the expected session sizes (< 100 rules), linear scan with string matching is fast enough. No need for a trie or compiled regex engine. If sessions grow larger, index rules by `provider:service` prefix.

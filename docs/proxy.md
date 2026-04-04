@@ -8,8 +8,8 @@ Transparent MITM proxy. Session-scoped CA cert injected into sandbox at creation
 
 - Intercept all outbound HTTPS from sandbox
 - Parse cloud provider API calls into structured actions
-- Check action against permission tree (forbid → permit → implicit ask → deny)
-- For state-dependent permissions: run point-of-use `when` condition verification before forwarding
+- Check action against permission tree (forbid → permit → implicit ask → deny). See [permission-tree.md § Evaluation Algorithm](permission-tree.md#evaluation-algorithm).
+- For state-dependent permissions: run point-of-use [`when` condition verification](permission-tree.md#evaluation-algorithm) before forwarding (cached within `max_staleness`, host-side execution, timeout = deny)
 - For unknown actions: submit implicit ask to judge
 - Inject credentials from vault into approved requests
 - Log all allow/deny decisions with full request metadata

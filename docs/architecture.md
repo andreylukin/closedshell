@@ -187,7 +187,7 @@ This is deferred. The seatbelt path covers the primary use case.
 | Syscall filtering | seccomp-bpf (Linux) / seatbelt (macOS) | Kernel-level |
 | Network egress | All traffic forced through proxy | No network without proxy |
 | API enforcement | L7 proxy parsing + permission tree | Catches all HTTP |
-| Precondition enforcement | Point-of-use verification in proxy | No stale-grant window |
+| `when` condition enforcement | Point-of-use verification in proxy | No stale-grant window |
 | Credential isolation | Mounted in sandbox, but proxy enforces | Agent can't bypass proxy |
 | Judge isolation | Structured input only, single model | Agent can't prompt-inject judge |
 | Judge failure mode | Timeout/error = deny | Fail closed, always |

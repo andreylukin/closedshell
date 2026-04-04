@@ -21,7 +21,7 @@ cargo fmt --check                    # format check
 
 **Enforcement:** Seatbelt denies all network-outbound except `localhost:8443`. Env-var proxy forces HTTPS through host-side MITM proxy. Proxy terminates TLS (SNI peek → dynamic cert from session CA), parses requests into canonical actions (`aws[profile=dev]:s3:ListBuckets`), checks permission tree, consults judge for unknowns. Proxy holds requests during judge evaluation — agents never retry.
 
-**Permission Tree:** In-memory, session-scoped. Types: `idempotent` (persistent regex), `one-shot` (consumed), `state-dependent` (preconditions checked at point-of-use). Standalone, no system deps — unit-testable from day one.
+**Permission Tree:** Cedar-inspired (forbid-overrides-permit, default deny). In-memory, session-scoped. Types: `idempotent` (persistent glob), `one-shot` (consumed), `state-dependent` (`when` conditions checked at point-of-use). Templates for cold start. Standalone, no system deps — unit-testable from day one. See `docs/permission-tree.md`.
 
 **Judge:** Single LLM, OpenAI-compatible API. Structured JSON only. Timeout = deny. No fallbacks.
 
@@ -33,6 +33,6 @@ cargo fmt --check                    # format check
 
 1. Permission Tree + Sandbox/Daemon/Proxy (parallel)
 2. Judge Integration
-3. Human Approval + Preconditions (parallel)
+3. Human Approval + `when` Conditions (parallel)
 
-See `README.md` for full spec and `docs/architecture.md` for the macOS interception model.
+See `README.md` for overview and `docs/` for detailed design.

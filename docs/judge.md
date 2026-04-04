@@ -56,8 +56,8 @@ The `implicit` field indicates whether this came from an explicit `ask allow` or
   "decision": "escalate_human",
   "risk_level": "moderate",
   "reasoning": "UpdateService is a state change on production ECS",
-  "proposed_expansion": ["aws:ecs:UpdateService (one-shot, preconditioned)"],
-  "suggested_preconditions": [
+  "proposed_expansion": ["aws[profile=prod]:ecs:UpdateService (one-shot, with when conditions)"],
+  "suggested_when": [
     {"cmd": "aws ecs describe-services ...", "expect": "runningCount >= 2", "max_staleness": "30s"}
   ]
 }
