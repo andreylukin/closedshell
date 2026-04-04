@@ -35,12 +35,16 @@ pub struct RequestInfo {
 
 /// Parse an HTTP request into a canonical action.
 pub fn parse_action(req: &RequestInfo) -> Action {
-    // Try provider-specific parsers in order
     if let Some(action) = try_parse_aws(req) {
         return action;
     }
+    if let Some(action) = try_parse_gcp(req) {
+        return action;
+    }
+    if let Some(action) = try_parse_github(req) {
+        return action;
+    }
 
-    // Fallback: generic net:METHOD:host/path
     parse_generic(req)
 }
 
@@ -56,30 +60,29 @@ fn parse_generic(req: &RequestInfo) -> Action {
 }
 
 fn try_parse_aws(req: &RequestInfo) -> Option<Action> {
-    // AWS endpoints: *.amazonaws.com
     if !req.host.ends_with(".amazonaws.com") {
         return None;
     }
 
-    // Extract service from host: ec2.amazonaws.com → ec2
-    // or: s3.us-east-1.amazonaws.com → s3
+    // Extract service from host. Examples:
+    //   s3.amazonaws.com → s3
+    //   s3.us-east-1.amazonaws.com → s3
+    //   ec2.us-west-2.amazonaws.com → ec2
+    //   ecs.amazonaws.com → ecs
     let service = req.host.split('.').next()?;
 
-    // AWS actions come from either:
-    // 1. Query param: ?Action=DescribeInstances
-    // 2. X-Amz-Target header: AmazonEC2.DescribeInstances
-    // 3. REST-style from method + path (S3, API Gateway)
     let operation = if let Some(action) = req.query_params.get("Action") {
         action.clone()
     } else if let Some(target) = req.headers.get("x-amz-target") {
         // Format: ServiceName.OperationName
         target.split('.').next_back().unwrap_or(target).to_string()
+    } else if service == "s3" {
+        // S3 REST-style: map method + path to operation
+        parse_s3_rest_operation(&req.method, &req.path)
     } else {
-        // REST-style: use method as operation hint
         format!("{}:{}", req.method, req.path)
     };
 
-    // Extract profile from authorization header or default
     let profile = extract_aws_profile(req);
 
     let raw = format!("aws[profile={}]:{}:{}", profile, service, operation);
@@ -95,18 +98,152 @@ fn try_parse_aws(req: &RequestInfo) -> Option<Action> {
     })
 }
 
+/// Map S3 REST method+path to a human-readable operation name.
+/// Path format: / (list buckets), /bucket (bucket ops), /bucket/key (object ops)
+fn parse_s3_rest_operation(method: &str, path: &str) -> String {
+    let parts: Vec<&str> = path
+        .trim_start_matches('/')
+        .splitn(2, '/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    match (method, parts.len()) {
+        ("GET", 0) => "ListBuckets".into(),
+        ("GET", 1) => "ListObjects".into(),
+        ("GET", 2) => "GetObject".into(),
+        ("PUT", 1) => "CreateBucket".into(),
+        ("PUT", _) => "PutObject".into(),
+        ("DELETE", 1) => "DeleteBucket".into(),
+        ("DELETE", _) => "DeleteObject".into(),
+        ("HEAD", 1) => "HeadBucket".into(),
+        ("HEAD", _) => "HeadObject".into(),
+        ("POST", 1) => "PostObject".into(),
+        _ => format!("{}:{}", method, path),
+    }
+}
+
 fn extract_aws_profile(req: &RequestInfo) -> String {
-    // In practice, the proxy knows which credential mount was used.
-    // For now, extract from the access key or default to "default".
     if let Some(auth) = req.headers.get("authorization")
         && auth.contains("Credential=")
     {
-        // AWS Signature V4: Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request
-        // We can't map access key → profile without the credentials file.
-        // For YOLO mode, "default" is fine. Judge integration will resolve this later.
         return "default".into();
     }
     "default".into()
+}
+
+fn try_parse_gcp(req: &RequestInfo) -> Option<Action> {
+    if !req.host.ends_with(".googleapis.com") {
+        return None;
+    }
+
+    // Extract service from host: compute.googleapis.com → compute
+    let service = req.host.strip_suffix(".googleapis.com")?;
+
+    // GCP REST paths look like:
+    // /compute/v1/projects/{project}/zones/{zone}/instances/{id}
+    // /storage/v1/b/{bucket}/o/{object}
+    let path_segments: Vec<&str> = req
+        .path
+        .trim_start_matches('/')
+        .split('/')
+        .collect();
+
+    // Extract project from path if present
+    let project = path_segments
+        .iter()
+        .zip(path_segments.iter().skip(1))
+        .find(|(key, _)| **key == "projects")
+        .map(|(_, val)| val.to_string())
+        .unwrap_or_else(|| "unknown".into());
+
+    // Build a dotted resource path from the path segments, skipping version and project info.
+    // e.g., compute.instances.get from GET .../instances/{id}
+    let operation = parse_gcp_operation(service, &req.method, &path_segments);
+
+    let raw = format!("gcp[project={}]:{}:{}", project, service, operation);
+    let mut qualifier = HashMap::new();
+    qualifier.insert("project".into(), project);
+
+    Some(Action {
+        provider: "gcp".into(),
+        qualifier,
+        service: service.into(),
+        operation,
+        raw,
+    })
+}
+
+/// Parse GCP REST path into a dotted operation string.
+/// Strategy: take the last resource type from the path and combine with HTTP method.
+fn parse_gcp_operation(service: &str, method: &str, segments: &[&str]) -> String {
+    // Skip version prefix (e.g., "compute", "v1") and project/zone qualifiers
+    // Look for known resource segments
+    let skip_keys = ["projects", "zones", "regions", "locations", "global"];
+
+    // Collect resource types (segments that aren't IDs or qualifier values)
+    let mut resources = Vec::new();
+    let mut i = 0;
+    // Skip service name and version at the start
+    while i < segments.len() {
+        let seg = segments[i];
+        if seg.starts_with('v') && seg[1..].chars().all(|c| c.is_ascii_digit()) {
+            i += 1;
+            continue; // skip version
+        }
+        if seg == service {
+            i += 1;
+            continue; // skip service name repeat
+        }
+        if skip_keys.contains(&seg) {
+            i += 2; // skip key + value
+            continue;
+        }
+        // This is either a resource type or an ID
+        // Heuristic: resource types are alphabetic, IDs contain digits/hyphens
+        if seg.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '_')
+            && !seg.is_empty()
+        {
+            resources.push(seg);
+            i += 1;
+        } else {
+            // Skip IDs
+            i += 1;
+        }
+    }
+
+    let method_verb = match method {
+        "GET" => "get",
+        "POST" => "insert",
+        "PUT" => "update",
+        "PATCH" => "patch",
+        "DELETE" => "delete",
+        other => other,
+    };
+
+    if resources.is_empty() {
+        return method_verb.to_string();
+    }
+
+    // Join resource types with dots and append method
+    let resource_path = resources.join(".");
+    format!("{}.{}", resource_path, method_verb)
+}
+
+fn try_parse_github(req: &RequestInfo) -> Option<Action> {
+    if req.host != "api.github.com" {
+        return None;
+    }
+
+    let path = req.path.trim_start_matches('/');
+    let raw = format!("gh:{}:{}", path, req.method);
+
+    Some(Action {
+        provider: "gh".into(),
+        qualifier: HashMap::new(),
+        service: path.to_string(),
+        operation: req.method.clone(),
+        raw,
+    })
 }
 
 #[cfg(test)]
@@ -124,11 +261,13 @@ mod tests {
         }
     }
 
+    // -- Generic tests --
+
     #[test]
     fn test_generic_get() {
-        let req = make_request("GET", "api.github.com", "/repos/foo/bar");
+        let req = make_request("GET", "api.example.com", "/v1/data");
         let action = parse_action(&req);
-        assert_eq!(action.canonical(), "net:GET:api.github.com/repos/foo/bar");
+        assert_eq!(action.canonical(), "net:GET:api.example.com/v1/data");
         assert_eq!(action.provider, "net");
     }
 
@@ -142,6 +281,8 @@ mod tests {
         );
     }
 
+    // -- AWS tests --
+
     #[test]
     fn test_aws_query_action() {
         let mut req = make_request("POST", "ec2.amazonaws.com", "/");
@@ -152,6 +293,17 @@ mod tests {
             action.canonical(),
             "aws[profile=default]:ec2:DescribeInstances"
         );
+        assert_eq!(action.provider, "aws");
+        assert_eq!(action.service, "ec2");
+        assert_eq!(action.operation, "DescribeInstances");
+    }
+
+    #[test]
+    fn test_aws_regional_endpoint() {
+        let mut req = make_request("POST", "ec2.us-west-2.amazonaws.com", "/");
+        req.query_params
+            .insert("Action".into(), "DescribeInstances".into());
+        let action = parse_action(&req);
         assert_eq!(action.provider, "aws");
         assert_eq!(action.service, "ec2");
         assert_eq!(action.operation, "DescribeInstances");
@@ -180,8 +332,161 @@ mod tests {
     }
 
     #[test]
+    fn test_aws_s3_list_buckets() {
+        let req = make_request("GET", "s3.amazonaws.com", "/");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "aws");
+        assert_eq!(action.service, "s3");
+        assert_eq!(action.operation, "ListBuckets");
+    }
+
+    #[test]
+    fn test_aws_s3_list_objects() {
+        let req = make_request("GET", "s3.amazonaws.com", "/my-bucket");
+        let action = parse_action(&req);
+        assert_eq!(action.operation, "ListObjects");
+    }
+
+    #[test]
+    fn test_aws_s3_get_object() {
+        let req = make_request("GET", "s3.amazonaws.com", "/my-bucket/some/key.txt");
+        let action = parse_action(&req);
+        assert_eq!(action.operation, "GetObject");
+    }
+
+    #[test]
+    fn test_aws_s3_put_object() {
+        let req = make_request("PUT", "s3.amazonaws.com", "/my-bucket/key.txt");
+        let action = parse_action(&req);
+        assert_eq!(action.operation, "PutObject");
+    }
+
+    #[test]
+    fn test_aws_s3_delete_object() {
+        let req = make_request("DELETE", "s3.amazonaws.com", "/my-bucket/key.txt");
+        let action = parse_action(&req);
+        assert_eq!(action.operation, "DeleteObject");
+    }
+
+    #[test]
+    fn test_aws_s3_create_bucket() {
+        let req = make_request("PUT", "s3.amazonaws.com", "/new-bucket");
+        let action = parse_action(&req);
+        assert_eq!(action.operation, "CreateBucket");
+    }
+
+    #[test]
+    fn test_aws_s3_delete_bucket() {
+        let req = make_request("DELETE", "s3.amazonaws.com", "/my-bucket");
+        let action = parse_action(&req);
+        assert_eq!(action.operation, "DeleteBucket");
+    }
+
+    #[test]
     fn test_non_aws_not_matched() {
         let req = make_request("GET", "example.com", "/api/v1");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "net");
+    }
+
+    // -- GCP tests --
+
+    #[test]
+    fn test_gcp_compute_instances_get() {
+        let req = make_request(
+            "GET",
+            "compute.googleapis.com",
+            "/compute/v1/projects/my-project/zones/us-central1-a/instances/my-instance",
+        );
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "gcp");
+        assert_eq!(action.service, "compute");
+        assert_eq!(action.qualifier.get("project").unwrap(), "my-project");
+        assert!(action.operation.contains("instances"));
+        assert!(action.operation.ends_with("get"));
+    }
+
+    #[test]
+    fn test_gcp_compute_instances_delete() {
+        let req = make_request(
+            "DELETE",
+            "compute.googleapis.com",
+            "/compute/v1/projects/my-project/zones/us-central1-a/instances/i-123",
+        );
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "gcp");
+        assert!(action.operation.ends_with("delete"));
+    }
+
+    #[test]
+    fn test_gcp_storage() {
+        let req = make_request(
+            "GET",
+            "storage.googleapis.com",
+            "/storage/v1/b/my-bucket/o/my-object",
+        );
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "gcp");
+        assert_eq!(action.service, "storage");
+    }
+
+    #[test]
+    fn test_gcp_project_extraction() {
+        let req = make_request(
+            "POST",
+            "compute.googleapis.com",
+            "/compute/v1/projects/prod-project-123/zones/us-east1-b/instances",
+        );
+        let action = parse_action(&req);
+        assert_eq!(
+            action.qualifier.get("project").unwrap(),
+            "prod-project-123"
+        );
+    }
+
+    #[test]
+    fn test_non_gcp_not_matched() {
+        let req = make_request("GET", "api.google.com", "/something");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "net");
+    }
+
+    // -- GitHub tests --
+
+    #[test]
+    fn test_github_repos_get() {
+        let req = make_request("GET", "api.github.com", "/repos/owner/repo");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "gh");
+        assert_eq!(action.canonical(), "gh:repos/owner/repo:GET");
+    }
+
+    #[test]
+    fn test_github_pulls_post() {
+        let req = make_request("POST", "api.github.com", "/repos/owner/repo/pulls");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "gh");
+        assert_eq!(action.canonical(), "gh:repos/owner/repo/pulls:POST");
+        assert_eq!(action.operation, "POST");
+    }
+
+    #[test]
+    fn test_github_issues_get() {
+        let req = make_request("GET", "api.github.com", "/repos/owner/repo/issues");
+        let action = parse_action(&req);
+        assert_eq!(action.canonical(), "gh:repos/owner/repo/issues:GET");
+    }
+
+    #[test]
+    fn test_github_user() {
+        let req = make_request("GET", "api.github.com", "/user");
+        let action = parse_action(&req);
+        assert_eq!(action.canonical(), "gh:user:GET");
+    }
+
+    #[test]
+    fn test_non_github_not_matched() {
+        let req = make_request("GET", "github.com", "/owner/repo");
         let action = parse_action(&req);
         assert_eq!(action.provider, "net");
     }
