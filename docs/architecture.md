@@ -176,3 +176,18 @@ The proxy is the real enforcement boundary, and it works identically on both pla
 For untrusted agents requiring VM-level isolation, launch inside an Apple Container (Virtualization.framework). Same proxy, same judge, same `ask` CLI — just swap the process wrapper. The agent runs in a lightweight Linux VM with full namespace/seccomp support internally.
 
 This is deferred. The seatbelt path covers the primary use case.
+
+---
+
+## Security Boundaries
+
+| Layer | Mechanism | Bypass Resistance |
+|-------|-----------|-------------------|
+| Process isolation | Platform-specific (namespaces / seatbelt) | Kernel-level |
+| Syscall filtering | seccomp-bpf (Linux) / seatbelt (macOS) | Kernel-level |
+| Network egress | All traffic forced through proxy | No network without proxy |
+| API enforcement | L7 proxy parsing + permission tree | Catches all HTTP |
+| Precondition enforcement | Point-of-use verification in proxy | No stale-grant window |
+| Credential isolation | Mounted in sandbox, but proxy enforces | Agent can't bypass proxy |
+| Judge isolation | Structured input only, single model | Agent can't prompt-inject judge |
+| Judge failure mode | Timeout/error = deny | Fail closed, always |

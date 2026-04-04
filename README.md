@@ -94,11 +94,10 @@ Ships as two static binaries: `closedshell` (host) and `ask` (sandbox).
 
 | Doc | What's in it |
 |-----|-------------|
-| [docs/architecture.md](docs/architecture.md) | Platform sandbox design (macOS Seatbelt + proxy, Linux namespaces) |
-| [docs/permission-tree.md](docs/permission-tree.md) | Cedar-inspired permission model, evaluation algorithm, action format, schema |
+| [docs/architecture.md](docs/architecture.md) | Platform sandbox design (macOS Seatbelt + proxy, Linux namespaces), security boundaries |
+| [docs/permission-tree.md](docs/permission-tree.md) | Cedar-inspired permission model, evaluation algorithm, action format, templates, flows, denial UX |
 | [docs/judge.md](docs/judge.md) | Judge config, structured I/O, decision matrix |
 | [docs/proxy.md](docs/proxy.md) | HTTPS proxy, provider parsers, credential qualifier format, credential mounts |
-| [docs/execution-flows.md](docs/execution-flows.md) | Cold start, implicit ask, plan approval, denial UX, security boundaries |
 | [docs/development.md](docs/development.md) | Build sections, dependency graph, recommended build order |
 
 ---
