@@ -176,6 +176,81 @@ net:GET:api.github.com/repos/foo/bar
 net:POST:hooks.slack.com/services/T00/B00/xxx
 ```
 
+### File I/O actions
+
+File access through `ask read` / `ask write` uses the `file` provider:
+
+```
+file:read:/Users/andrey/repos/myproject/src/main.rs
+file:write:/Users/andrey/repos/myproject/output.json
+file:read:/etc/hosts
+```
+
+Same glob matching as network actions:
+
+| Pattern | Matches |
+|---|---|
+| `file:read:/Users/andrey/repos/*` | Any file read under repos/ |
+| `file:write:$SANDBOX_TMPDIR/*` | Writes to sandbox tmpdir |
+| `file:read:*` | Read anything (template: dev-readonly) |
+
+---
+
+## File I/O Model (audit + control)
+
+ClosedShell's threat model focuses on remote damage (cloud API abuse), not local mischief. File access reflects this:
+
+| Operation | Enforcement | Mechanism |
+|---|---|---|
+| **Writes outside tmpdir** | **Enforced** | Seatbelt denies `file-write*` except tmpdir. Only way to write elsewhere is `ask write` → daemon writes on host side after permission check. |
+| **Reads** | **Audited** | Agent can `cat` files directly (Seatbelt allows `file-read*`). `ask read` is the audited path — goes through permission tree, logged, judge can reason about it. |
+| **Writes inside tmpdir** | **Unrestricted** | Agent's scratch space. No permission needed. |
+
+### `ask read <path>`
+
+1. `ask` CLI sends read request over Unix socket → daemon
+2. Daemon evaluates `file:read:<path>` against permission tree (forbid → permit → implicit ask)
+3. If permitted: daemon reads file on host side, returns content to agent
+4. Logged with full path and timestamp
+
+Agent can also `cat` the file directly — Seatbelt allows reads. But `ask read` gives the judge visibility and lets forbid rules block sensitive reads (e.g., `forbid file:read:/Users/*/.ssh/*`).
+
+### `ask write <path> [content]`
+
+1. `ask` CLI sends write request over Unix socket → daemon
+2. Daemon evaluates `file:write:<path>` against permission tree
+3. If permitted: daemon writes file on host side, confirms to agent
+4. Logged with full path, size, and timestamp
+
+This is the **only** way to write outside the sandbox tmpdir. Seatbelt enforces this — `deny file-write*` with tmpdir exception means the agent literally cannot write elsewhere on its own.
+
+### Example rules
+
+```yaml
+# Template: dev-workspace
+- effect: forbid
+  action: "file:write:/Users/*/.*"
+  reason: "no writing dotfiles (.ssh, .aws, .gitconfig, etc.)"
+
+- effect: forbid
+  action: "file:read:/Users/*/.ssh/*"
+  reason: "no reading SSH keys"
+
+- effect: permit
+  action: "file:read:*"
+  type: idempotent
+  approved_by: template:dev-workspace
+
+- effect: permit
+  action: "file:write:/Users/andrey/repos/myproject/*"
+  type: idempotent
+  approved_by: template:dev-workspace
+```
+
+### Why not enforce reads too?
+
+Enforcing reads (Seatbelt `deny file-read*`) would break every CLI tool — `aws`, `git`, `python`, `node` all read config files, shared libraries, and certificates. The tradeoff: reads are observable via `ask read` and blockable via forbid rules, but the agent *can* bypass them with direct file access. This matches the threat model — an agent reading your `.bashrc` is annoying, an agent `aws s3 rm --recursive` is catastrophic.
+
 ---
 
 ## Rule Types

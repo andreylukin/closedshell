@@ -6,6 +6,21 @@ A lightweight sandbox that lets AI agents discover their own permissions through
 
 ---
 
+## Why This Exists
+
+An AI agent that `rm -rf`'s your home directory is annoying. An AI agent that terminates your production fleet, deletes your S3 buckets, or pushes a bad deploy to 10,000 servers is a catastrophe. The blast radius is the difference.
+
+**ClosedShell protects against remote damage, not local mischief.** The threat model is:
+
+- **What we stop:** Mass deletes across cloud infrastructure. Unauthorized API calls to production. Credential abuse at scale. One agent mistake becoming an organization-wide incident.
+- **What we don't worry about:** An agent writing junk to its own tmpdir. Reading local files it shouldn't (it's your machine). CPU/memory abuse. These are annoying but recoverable.
+
+The enforcement boundary is the **network proxy**, not the filesystem. Every outbound API call is parsed, classified, and checked against a permission tree before it leaves your machine. Local file access uses an audit + control model — writes outside the sandbox require explicit permission, reads are observable but not gated.
+
+This means ClosedShell is lightweight enough to actually use. No VM boot times, no broken CLI tools, no fighting your OS. Just a sandbox that makes sure your agent can't `aws ec2 terminate-instances` without permission.
+
+---
+
 ## How It Works
 
 ```
@@ -57,9 +72,11 @@ ask allow <action>            # request single permission
 ask plan "<description>"      # batch approval via judge
 ask status                    # show current permissions
 ask what-can-i "<pattern>"    # query without requesting
+ask read <path>               # read file (audited, permission-checked)
+ask write <path> [content]    # write file outside sandbox (permission-checked)
 ```
 
-Most agents don't need `ask` — the proxy handles it automatically via implicit ask.
+Most agents don't need `ask` for network — the proxy handles it automatically via implicit ask. File writes outside the sandbox tmpdir *require* `ask write`.
 
 ### Sandbox
 
