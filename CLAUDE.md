@@ -29,10 +29,26 @@ cargo fmt --check                    # format check
 
 **Crates:** tokio, rustls, rcgen, hyper, reqwest, serde/serde_yaml, clap.
 
+## Project Structure
+
+```
+crates/
+  closedshell-lib/   # shared library (config, parsers, proxy, audit, tls, sandbox)
+  closedshell/       # host binary (CLI + daemon)
+  ask/               # in-sandbox binary (not needed for YOLO phase)
+current_tasks/       # agent task tracking (see AGENT_PROMPT.md)
+docs/                # spec (DO NOT MODIFY — treat as requirements)
+```
+
+## Current Phase: YOLO Shell
+
+Building the log-only sandbox: intercept all HTTPS, parse into actions, log everything, block nothing. See `AGENT_PROMPT.md` for task details and workflow.
+
 ## Build Order
 
-1. Permission Tree + Sandbox/Daemon/Proxy (parallel)
-2. Judge Integration
-3. TUI + Human Approval
+1. **YOLO Shell** (current) — sandbox + proxy + parsers + audit logging
+2. Permission Tree
+3. Judge Integration
+4. TUI + Human Approval
 
 See `README.md` for overview and `docs/` for detailed design.

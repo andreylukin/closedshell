@@ -1,0 +1,14 @@
+[package]
+name = "ask"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ask"
+path = "src/main.rs"
+
+[dependencies]
+closedshell-lib = { path = "../closedshell-lib" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
