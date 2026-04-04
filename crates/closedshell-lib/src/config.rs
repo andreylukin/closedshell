@@ -142,8 +142,62 @@ impl Default for JudgeConfig {
 }
 
 
+/// Resolve `~` prefix in a path to the user's home directory.
+pub fn resolve_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        format!("{}/{}", home, rest)
+    } else if path == "~" {
+        std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
+    } else {
+        path.to_string()
+    }
+}
+
+/// CLI flags that can override config values.
+pub struct CliFlags {
+    pub yolo: bool,
+    pub no_motd: bool,
+    pub task: Option<String>,
+    pub templates: Vec<String>,
+}
+
+impl Config {
+    /// Merge CLI flags onto this config. CLI flags override file config.
+    pub fn merge_cli_flags(&mut self, flags: &CliFlags) {
+        if flags.yolo {
+            self.sandbox.yolo = true;
+        }
+        if flags.no_motd {
+            self.sandbox.motd = false;
+        }
+        if !flags.templates.is_empty() {
+            self.sandbox.templates_dir = resolve_tilde(&self.sandbox.templates_dir);
+        }
+    }
+
+    /// Resolve all `~` paths in the config.
+    pub fn resolve_paths(&mut self) {
+        self.sandbox.templates_dir = resolve_tilde(&self.sandbox.templates_dir);
+        for cred in &mut self.sandbox.credentials {
+            if let Some(ref source) = cred.source {
+                cred.source = Some(resolve_tilde(source));
+            }
+            if let Some(ref mount) = cred.mount {
+                cred.mount = Some(resolve_tilde(mount));
+            }
+            if let Some(ref tp) = cred.token_path {
+                cred.token_path = Some(resolve_tilde(tp));
+            }
+        }
+        if let Some(ref path) = self.judge.system_prompt_path {
+            self.judge.system_prompt_path = Some(resolve_tilde(path));
+        }
+    }
+}
+
 /// Load config from disk. Checks ./closedshell.yaml first, then ~/.closedshell/config.yaml.
-/// Returns default config if neither exists.
+/// Returns default config if neither exists. Paths with `~` are resolved.
 pub fn load_config() -> anyhow::Result<Config> {
     let candidates = [
         std::path::PathBuf::from("closedshell.yaml"),
@@ -153,12 +207,15 @@ pub fn load_config() -> anyhow::Result<Config> {
     for path in &candidates {
         if path.exists() {
             let contents = std::fs::read_to_string(path)?;
-            let config: Config = serde_yaml::from_str(&contents)?;
+            let mut config: Config = serde_yaml::from_str(&contents)?;
+            config.resolve_paths();
             return Ok(config);
         }
     }
 
-    Ok(Config::default())
+    let mut config = Config::default();
+    config.resolve_paths();
+    Ok(config)
 }
 
 fn dirs_config_path() -> std::path::PathBuf {
@@ -187,6 +244,88 @@ mod tests {
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(config.sandbox.yolo);
         assert!(config.sandbox.motd); // default
+    }
+
+    #[test]
+    fn test_resolve_tilde() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(resolve_tilde("~/foo/bar"), format!("{}/foo/bar", home));
+        assert_eq!(resolve_tilde("~"), home);
+        assert_eq!(resolve_tilde("/absolute/path"), "/absolute/path");
+        assert_eq!(resolve_tilde("relative/path"), "relative/path");
+    }
+
+    #[test]
+    fn test_merge_cli_flags_yolo() {
+        let mut config = Config::default();
+        assert!(!config.sandbox.yolo);
+        assert!(config.sandbox.motd);
+
+        let flags = CliFlags {
+            yolo: true,
+            no_motd: true,
+            task: None,
+            templates: vec![],
+        };
+        config.merge_cli_flags(&flags);
+
+        assert!(config.sandbox.yolo);
+        assert!(!config.sandbox.motd);
+    }
+
+    #[test]
+    fn test_merge_cli_flags_no_override_when_false() {
+        let mut config = Config::default();
+        config.sandbox.yolo = true;
+        config.sandbox.motd = false;
+
+        let flags = CliFlags {
+            yolo: false,
+            no_motd: false,
+            task: None,
+            templates: vec![],
+        };
+        config.merge_cli_flags(&flags);
+
+        // Flags are false, so config values should remain unchanged
+        assert!(config.sandbox.yolo);
+        assert!(!config.sandbox.motd);
+    }
+
+    #[test]
+    fn test_resolve_paths_credentials() {
+        let yaml = r#"
+sandbox:
+  credentials:
+    - type: file
+      source: ~/.aws/credentials
+      mount: ~/.aws/credentials
+      readonly: true
+"#;
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.resolve_paths();
+
+        let home = std::env::var("HOME").unwrap();
+        let cred = &config.sandbox.credentials[0];
+        assert_eq!(cred.source.as_deref().unwrap(), format!("{}/.aws/credentials", home));
+        assert_eq!(cred.mount.as_deref().unwrap(), format!("{}/.aws/credentials", home));
+    }
+
+    #[test]
+    fn test_resolve_paths_templates_dir() {
+        let mut config = Config::default();
+        assert!(config.sandbox.templates_dir.starts_with("~"));
+        config.resolve_paths();
+        let home = std::env::var("HOME").unwrap();
+        assert!(config.sandbox.templates_dir.starts_with(&home));
+    }
+
+    #[test]
+    fn test_load_config_cwd_precedence() {
+        // When no config file exists, should return default
+        let config = load_config().unwrap();
+        assert!(!config.sandbox.yolo);
+        assert!(config.sandbox.motd);
     }
 
     #[test]
