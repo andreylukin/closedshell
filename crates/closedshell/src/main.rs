@@ -1,4 +1,11 @@
 use clap::Parser;
+use closedshell_lib::audit::{AuditLog, AuditPayload};
+use closedshell_lib::config::{self, CliFlags};
+use closedshell_lib::proxy::MitmProxy;
+use closedshell_lib::sandbox;
+use closedshell_lib::tls::SessionCA;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "closedshell", about = "Sandbox for AI agents")]
@@ -28,7 +35,17 @@ struct Cli {
     command: Vec<String>,
 }
 
-fn main() -> anyhow::Result<()> {
+fn generate_session_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{:08x}", (t & 0xFFFF_FFFF) as u32)
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -38,22 +55,140 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // TODO: implement session lifecycle
-    // 1. Load config
+    // 1. Load config and merge CLI flags
+    let mut config = config::load_config()?;
+    let flags = CliFlags {
+        yolo: cli.yolo,
+        no_motd: cli.no_motd,
+        task: cli.task.clone(),
+        templates: cli.template.clone(),
+    };
+    config.merge_cli_flags(&flags);
+
     // 2. Generate session ID
-    // 3. Start MITM proxy
-    // 4. Generate seatbelt profile
-    // 5. Print MOTD
-    // 6. Open audit log
-    // 7. Exec sandbox-exec with command
-    // 8. On exit: teardown
+    let session_id = generate_session_id();
+
+    // 3. Create tmpdir
+    let tmpdir = PathBuf::from(format!("/tmp/closedshell-{}", session_id));
+    std::fs::create_dir_all(&tmpdir)?;
+
+    // 4. Generate session CA, write CA PEM to tmpdir
+    let ca = Arc::new(SessionCA::new()?);
+    let ca_pem_path = tmpdir.join("ca.pem");
+    std::fs::write(&ca_pem_path, ca.ca_pem())?;
+
+    // 5. Start MITM proxy
+    let audit = Arc::new(AuditLog::open(&std::env::current_dir()?, &session_id)?);
+    let proxy = MitmProxy {
+        ca: ca.clone(),
+        audit: audit.clone(),
+        port: 8443,
+    };
+
+    let (actual_port, proxy_handle) = match proxy.start().await {
+        Ok(r) => r,
+        Err(_) => {
+            // Port 8443 taken, try OS-assigned
+            let proxy = MitmProxy {
+                ca: ca.clone(),
+                audit: audit.clone(),
+                port: 0,
+            };
+            proxy.start().await?
+        }
+    };
+
+    // 6. Generate seatbelt profile, write to tmpdir
+    let profile = sandbox::generate_seatbelt_profile(
+        &config.sandbox.exec_allowlist,
+        &tmpdir,
+        actual_port,
+    );
+    let profile_path = tmpdir.join("profile.sb");
+    std::fs::write(&profile_path, &profile)?;
+
+    // 7. Print MOTD
+    if config.sandbox.motd {
+        let mode = if config.sandbox.yolo { "yolo" } else { "enforcing" };
+        eprintln!("[closedshell] session {} (new)", session_id);
+        if let Some(ref task) = cli.task {
+            eprintln!("[closedshell] task: {}", task);
+        }
+        if !cli.template.is_empty() {
+            eprintln!("[closedshell] templates: {}", cli.template.join(", "));
+        }
+        eprintln!("[closedshell] mode: {}", mode);
+        eprintln!("[closedshell] log: ./closedshell-{}.log", session_id);
+    }
+
+    // 8. Log session_start event
+    audit.log(AuditPayload::SessionStart {
+        command: cli.command.join(" "),
+        templates: cli.template.clone(),
+        yolo: config.sandbox.yolo,
+    })?;
+
+    let start_time = std::time::Instant::now();
+
+    // 9. Build and exec sandbox-exec with environment
+    let proxy_url = format!("http://localhost:{}", actual_port);
+
+    let mut cmd = std::process::Command::new("sandbox-exec");
+    cmd.arg("-f")
+        .arg(&profile_path)
+        .arg("env")
+        .arg(format!("HTTPS_PROXY={}", proxy_url))
+        .arg(format!("HTTP_PROXY={}", proxy_url))
+        .arg(format!("SSL_CERT_FILE={}", ca_pem_path.display()))
+        .arg(format!(
+            "CLOSEDSHELL_SOCKET={}/ask.sock",
+            tmpdir.display()
+        ))
+        .arg(format!("CLOSEDSHELL_SESSION={}", session_id))
+        .arg("--");
+
+    // Pass through credential env vars
+    for cred in &config.sandbox.credentials {
+        if matches!(cred.mount_type, closedshell_lib::config::CredentialType::Env) {
+            for var in &cred.vars {
+                if let Ok(val) = std::env::var(var) {
+                    cmd.arg(format!("{}={}", var, val));
+                }
+            }
+        }
+    }
+
+    cmd.args(&cli.command);
 
     tracing::info!(
+        session = %session_id,
+        port = actual_port,
         command = ?cli.command,
-        yolo = cli.yolo,
-        "closedshell starting"
+        "sandbox starting"
     );
 
-    eprintln!("closedshell: not yet implemented");
-    std::process::exit(1);
+    // 10. Wait for child process
+    let status = cmd.status()?;
+
+    // 11. Cleanup
+    let duration = start_time.elapsed();
+    audit.log(AuditPayload::SessionEnd {
+        duration_s: duration.as_secs(),
+        total_decisions: 0, // TODO: track in proxy
+        denied: 0,
+    })?;
+
+    proxy_handle.abort();
+
+    // Remove tmpdir
+    let _ = std::fs::remove_dir_all(&tmpdir);
+
+    tracing::info!(
+        session = %session_id,
+        duration_s = duration.as_secs(),
+        "session ended"
+    );
+
+    // Exit with child's exit code
+    std::process::exit(status.code().unwrap_or(1));
 }
