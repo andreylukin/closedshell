@@ -46,6 +46,36 @@ See [permission-tree.md § Schema](permission-tree.md#schema-compile-time-valida
 
 ---
 
+## Denial Response Format
+
+When the proxy denies a request, it returns an HTTP response directly to the agent — no upstream connection is made.
+
+```
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+X-ClosedShell-Denied: true
+
+{
+  "error": "denied",
+  "action": "aws[profile=prod]:ec2:TerminateInstances",
+  "reason": "session policy: no production terminates",
+  "risk_tier": "dangerous",
+  "hint": "ask plan \"describe your goal\""
+}
+```
+
+The `X-ClosedShell-Denied` header lets agents programmatically distinguish proxy denials from upstream 403s.
+
+---
+
+## Credential Passthrough
+
+Credentials are **passed through**, not injected. The agent's tools (aws, gcloud, kubectl) pick up credentials from the mounted files and environment variables and include them in outbound requests normally. The proxy forwards these as-is.
+
+The proxy does not strip, replace, or add credentials. The sandbox boundary (seatbelt + proxy) ensures the agent can't use credentials to bypass the proxy — all network traffic is forced through it regardless.
+
+---
+
 ## Credential Mounts
 
 Credentials are mounted directly into the sandbox. The agent can read them, but **cannot use them to bypass the proxy** — the sandbox boundary forces all network traffic through the proxy regardless.

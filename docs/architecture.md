@@ -17,7 +17,7 @@
 │  │             │ │  compat) │ │                       │ │
 │  │ allow/deny  │ │ approve/ │ │ SNI peek → dynamic    │ │
 │  │ + implicit  │ │ escalate/│ │ cert → parse API call │ │
-│  │   ask       │ │ deny     │ │ → inject credentials  │ │
+│  │   ask       │ │ deny     │ │ → check permissions   │ │
 │  └──────┬─────┘ └────┬─────┘ └───────────┬───────────┘ │
 │         │            │                    │             │
 │         └────────────┴────────────────────┘             │
@@ -69,7 +69,7 @@ The proxy then:
 5. Parses the request into a canonical action (`aws:s3:ListBuckets`, `gh:repos/*/pulls:POST`, etc.)
 6. Checks the permission tree
 7. If unknown → implicit ask to judge → approve/escalate/deny
-8. If approved → establishes upstream TLS, injects credentials from vault, relays
+8. If approved → establishes upstream TLS, forwards request as-is (credentials pass through), relays response
 
 ```
 Agent runs: aws s3 ls
@@ -128,6 +128,49 @@ closedshell create -- <agent-command>
 7. Agent runs. All HTTPS → proxy. `ask` CLI → Unix socket.
 8. On exit: tear down proxy, remove tmpdir, clear permission tree.
 ```
+
+---
+
+## IPC Protocol (`ask` ↔ daemon)
+
+Unix socket, newline-delimited JSON. One request, one response. No streaming, no multiplexing.
+
+### Request
+
+```json
+{"type": "status"}
+{"type": "what_can_i", "pattern": "aws[profile=*]:s3:*"}
+{"type": "why_denied"}
+{"type": "allow", "action": "aws[profile=dev]:ec2:DescribeInstances"}
+{"type": "plan", "description": "rollback ECS deployment in us-east-1"}
+{"type": "read", "path": "/Users/andrey/repos/myproject/src/main.rs"}
+{"type": "write", "path": "/Users/andrey/repos/myproject/out.json", "content": "..."}
+```
+
+### Response
+
+```json
+{"ok": true, "data": ...}
+{"ok": false, "error": "not_permitted", "message": "no matching permission", "hint": "ask plan \"describe your goal\""}
+```
+
+`data` varies by request type:
+- `status` → `{"rules": [...]}` (current permission tree)
+- `what_can_i` → `{"matches": [...]}` (matching rules, no side effects)
+- `why_denied` → `{"action": "...", "reason": "...", "risk_tier": "...", "hint": "..."}`
+- `allow` → `{"rule": {...}}` (the granted rule) or error
+- `plan` → `{"plan_id": "...", "auto_approved": [...], "pending_human": [...]}`
+- `read` → `{"content": "..."}` or error
+- `write` → `{"bytes_written": N}` or error
+
+### Error codes
+
+| Code | Meaning |
+|------|---------|
+| `not_permitted` | Permission tree denied the action |
+| `pending_approval` | Queued for human approval, not yet resolved |
+| `invalid_request` | Malformed request |
+| `internal_error` | Daemon-side failure |
 
 ---
 

@@ -498,14 +498,20 @@ Agent: ask allow "aws[profile=dev]:ec2:DescribeInstances"
 
 ### Plan Approval (ask plan)
 
+The agent sends a free-text description. The judge — not the agent's LLM — decomposes it into a minimal permission set. See [judge.md § Plan Evaluation](judge.md#plan-evaluation-ask-plan) for judge I/O format.
+
 ```
 Agent: ask plan "Rollback bad ECS deployment"
-  1. Judge analyzes plan → proposes permission set
-  2. Read-only actions: auto-approved immediately
-  3. State-change/destructive: routed to human
-  4. Human approves via CLI/Slack
-  5. Full set added to tree (one-shots + when conditions)
-  6. Agent executes at full speed against pre-approved tree
+  1. ask CLI → daemon: {type: "plan", description: "Rollback bad ECS deployment"}
+  2. Daemon → judge: {plan_description, current_tree, session_context, credentials_available}
+  3. Judge returns: proposed rules (permits with types, when conditions, risk levels)
+  4. Daemon validates rules against schema + existing forbids
+  5. Safe actions → auto-approved, added to tree immediately
+  6. Moderate/dangerous → queued for human approval
+  7. Daemon → ask CLI: {plan_id: "plan-013", auto_approved: [...], pending_human: [...]}
+  8. Agent starts working with auto-approved permissions immediately
+  9. Human approves remaining via CLI/Slack → rules added to tree
+  10. Implicit ask fills gaps at runtime if the plan didn't anticipate every action
 ```
 
 ### State-Dependent Execution (point-of-use)

@@ -78,4 +78,68 @@ The `implicit` field indicates whether this came from an explicit `ask allow` or
 | judge timeout/error | `deny` | Fail closed. Always. |
 | already granted | *(skip judge)* | Fast path: tree glob match, forward immediately (~1ms). |
 
+---
+
+## Plan Evaluation (`ask plan`)
+
+The judge decomposes a free-text plan description into a minimal permission set. The agent's LLM never writes permissions directly — the judge is the authority on what actions a plan requires and how to scope them.
+
+### Input
+
+```json
+{
+  "type": "plan",
+  "description": "rollback ECS deployment in us-east-1",
+  "current_tree": ["aws[profile=prod]:ecs:Describe*", "aws[profile=prod]:ecs:List*"],
+  "session_context": {"task": "investigate 503s in us-east-1"},
+  "credentials_available": ["aws:profile=prod", "aws:profile=dev"]
+}
+```
+
+### Output
+
+```json
+{
+  "plan_id": "plan-013",
+  "rules": [
+    {
+      "effect": "permit",
+      "action": "aws[profile=prod]:ecs:DescribeServices",
+      "type": "idempotent",
+      "risk_level": "safe"
+    },
+    {
+      "effect": "permit",
+      "action": "aws[profile=prod]:ecs:DescribeTaskDefinition",
+      "type": "idempotent",
+      "risk_level": "safe"
+    },
+    {
+      "effect": "permit",
+      "action": "aws[profile=prod]:ecs:UpdateService",
+      "type": "one-shot",
+      "risk_level": "moderate",
+      "suggested_when": [
+        {"cmd": "aws ecs describe-services --service api --profile prod", "jsonpath": ".services[0].runningCount", "expect": ">= 2", "max_staleness": "30s"}
+      ]
+    }
+  ],
+  "reasoning": "rollback requires reading current state (Describe) and updating the service to a previous task definition (UpdateService). Scoped to one-shot with running count guard."
+}
+```
+
+### Daemon processing
+
+1. Receive judge's proposed rules
+2. Validate each rule against the permission tree schema
+3. Check against existing forbid rules — drop any proposed permits that would be overridden (warn the agent)
+4. Classify by risk tier:
+   - `safe` → auto-approve, add to tree immediately
+   - `moderate` / `dangerous` → queue for human approval
+5. Return to agent: `{plan_id, auto_approved: [...], pending_human: [...]}`
+
+The plan isn't a straitjacket. Implicit ask still fills gaps at runtime if the agent needs actions the plan didn't anticipate. The plan gives the agent a head start — pre-approved permissions so common actions don't block on judge latency.
+
+---
+
 **Latency expectations:** With a local 3-8B model on decent hardware, safe actions resolve in <100ms. Moderate actions in <500ms. These are guidelines, not guarantees — depends entirely on your model and hardware. The hard timeout (`timeout_ms`) is the real contract.
