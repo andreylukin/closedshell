@@ -81,12 +81,33 @@ async fn main() -> anyhow::Result<()> {
     let tmpdir = PathBuf::from(format!("/tmp/closedshell-{}", session_id));
     std::fs::create_dir_all(&tmpdir)?;
 
-    // 4. Generate session CA, write combined trust store (session CA + system roots) to tmpdir
-    let ca = Arc::new(SessionCA::new()?);
+    // 4. Load persistent CA from ~/.closedshell/ (or create on first run)
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let cs_dir = home.join(".closedshell");
+    let ca_cert_path = cs_dir.join("ca.pem");
+    let ca_key_path = cs_dir.join("ca-key.pem");
+    let is_new_ca = !ca_cert_path.exists();
+
+    let ca = Arc::new(SessionCA::load_or_create(&ca_cert_path, &ca_key_path)?);
+
+    // On first run, add CA to user trust store (no password required).
+    // Subsequent sessions reuse the same CA — no trust prompt needed.
+    if is_new_ca {
+        let trusted = std::process::Command::new("security")
+            .args(["add-trusted-cert", "-r", "trustRoot"])
+            .arg(&ca_cert_path)
+            .status()
+            .is_ok_and(|s| s.success());
+        if trusted {
+            eprintln!("[closedshell] CA created and trusted — this is a one-time setup");
+        } else {
+            tracing::warn!("could not add CA to user trust store — TLS interception may fail");
+        }
+    }
+
+    // Write combined trust store (our CA + system roots) to tmpdir for SSL_CERT_FILE
     let ca_pem_path = tmpdir.join("ca.pem");
     let mut trust_store = String::from(ca.ca_pem());
-    // Append system roots so clients that replace their root store with SSL_CERT_FILE
-    // (e.g., Go on macOS) can still verify upstream certs if needed.
     if let Ok(system_pem) = std::fs::read_to_string("/etc/ssl/cert.pem") {
         trust_store.push('\n');
         trust_store.push_str(&system_pem);
@@ -122,20 +143,6 @@ async fn main() -> anyhow::Result<()> {
     let profile = sandbox::generate_seatbelt_profile(actual_port);
     let profile_path = tmpdir.join("profile.sb");
     std::fs::write(&profile_path, &profile)?;
-
-    // 6b. Add session CA to macOS login keychain (removed on cleanup)
-    let security_status = std::process::Command::new("security")
-        .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
-        .arg(
-            PathBuf::from(std::env::var("HOME").unwrap())
-                .join("Library/Keychains/login.keychain-db"),
-        )
-        .arg(&ca_pem_path)
-        .status();
-    let ca_in_keychain = matches!(security_status, Ok(s) if s.success());
-    if !ca_in_keychain {
-        tracing::warn!("could not add session CA to login keychain — Go/macOS TLS may fail");
-    }
 
     // 7. Print MOTD
     if config.sandbox.motd {
@@ -227,15 +234,7 @@ async fn main() -> anyhow::Result<()> {
 
     proxy_handle.abort();
 
-    // Remove session CA from login keychain
-    if ca_in_keychain {
-        let _ = std::process::Command::new("security")
-            .args(["remove-trusted-cert"])
-            .arg(&ca_pem_path)
-            .status();
-    }
-
-    // Remove tmpdir
+    // Remove tmpdir (CA persists in ~/.closedshell/)
     let _ = std::fs::remove_dir_all(&tmpdir);
 
     tracing::info!(

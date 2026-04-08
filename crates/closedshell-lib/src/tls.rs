@@ -1,16 +1,18 @@
-//! Session-scoped CA and dynamic certificate generation.
+//! Persistent CA and dynamic certificate generation.
 //!
-//! Each session gets a unique CA. The proxy generates leaf certs on-the-fly
-//! per SNI hostname, signed by the session CA.
+//! A single CA lives at `~/.closedshell/ca.pem` + `ca-key.pem`, valid for 1 year.
+//! The proxy generates leaf certs on-the-fly per SNI hostname, signed by the CA.
+//! Per-session leaf cert caches are in-memory only.
 
 use rcgen::{
     CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 use time::OffsetDateTime;
 
-/// A session-scoped certificate authority.
+/// A certificate authority for MITM proxy interception.
 pub struct SessionCA {
     ca_cert_pem: String,
     ca_cert: rcgen::Certificate,
@@ -26,7 +28,7 @@ pub struct CachedCert {
 }
 
 impl SessionCA {
-    /// Generate a new session CA with a unique key pair, valid for 24 hours.
+    /// Generate a fresh CA key pair, valid for 1 year.
     pub fn new() -> anyhow::Result<Self> {
         let key_pair = KeyPair::generate()?;
 
@@ -34,20 +36,51 @@ impl SessionCA {
         params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         params
             .distinguished_name
-            .push(DnType::CommonName, "ClosedShell Session CA");
+            .push(DnType::CommonName, "ClosedShell CA");
         params
             .distinguished_name
             .push(DnType::OrganizationName, "ClosedShell");
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let now = OffsetDateTime::now_utc();
         params.not_before = now - time::Duration::hours(1);
-        params.not_after = now + time::Duration::days(1);
+        params.not_after = now + time::Duration::days(365);
 
         let ca_cert = params.self_signed(&key_pair)?;
         let ca_cert_pem = ca_cert.pem();
 
         Ok(Self {
             ca_cert_pem,
+            ca_cert,
+            ca_key: key_pair,
+            cache: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Load a CA from PEM files on disk, or generate and save a new one.
+    pub fn load_or_create(cert_path: &Path, key_path: &Path) -> anyhow::Result<Self> {
+        if cert_path.exists() && key_path.exists() {
+            let cert_pem = std::fs::read_to_string(cert_path)?;
+            let key_pem = std::fs::read_to_string(key_path)?;
+            Self::from_pem(&cert_pem, &key_pem)
+        } else {
+            let ca = Self::new()?;
+            if let Some(parent) = cert_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(cert_path, ca.ca_pem())?;
+            std::fs::write(key_path, ca.ca_key.serialize_pem())?;
+            Ok(ca)
+        }
+    }
+
+    /// Reconstruct a CA from PEM-encoded cert and private key.
+    fn from_pem(cert_pem: &str, key_pem: &str) -> anyhow::Result<Self> {
+        let key_pair = KeyPair::from_pem(key_pem)?;
+        let params = CertificateParams::from_ca_cert_pem(cert_pem)?;
+        let ca_cert = params.self_signed(&key_pair)?;
+
+        Ok(Self {
+            ca_cert_pem: cert_pem.to_string(),
             ca_cert,
             ca_key: key_pair,
             cache: Mutex::new(HashMap::new()),

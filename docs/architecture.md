@@ -62,7 +62,7 @@ All outbound HTTPS is forced through the host proxy via two mechanisms:
 The proxy then:
 1. Accepts the connection
 2. Peeks at TLS `ClientHello` → extracts SNI (target hostname)
-3. Generates a leaf cert for that hostname, signed by session-scoped CA
+3. Generates a leaf cert for that hostname, signed by the persistent CA (see [§ TLS Trust Model](#tls-trust-model))
 4. Terminates TLS → reads HTTP request
 5. Parses the request into a canonical action (`aws:s3:ListBuckets`, `gh:repos/*/pulls:POST`, etc.)
 6. Checks the permission tree
@@ -87,14 +87,31 @@ Process-exec allowlisting via seatbelt `process-exec` rules is planned for a fut
 
 ---
 
+## TLS Trust Model
+
+The MITM proxy needs sandboxed processes to trust its dynamically generated leaf certificates. This requires a CA that the system's TLS stack recognizes.
+
+**Why a persistent CA, not per-session:** A per-session CA means adding a new trusted cert on every launch — which on macOS triggers a keychain password prompt each time. That's a dealbreaker for a tool you start dozens of times a day. Instead, ClosedShell generates one CA on first run, stores it at `~/.closedshell/ca.pem`, and adds it to the macOS user trust store once (no admin password required). Every subsequent session reuses this CA — zero prompts, instant startup.
+
+**Two trust paths cover all clients:**
+
+1. **`SSL_CERT_FILE`** — set inside the sandbox to a bundle containing the ClosedShell CA + system roots. This covers most CLI tools: curl, Python, Node, Ruby, and Go with `GODEBUG=x509usefallbackroots=1`.
+2. **macOS user trust store** — the CA is registered via `security add-trusted-cert` on first run. This covers Go binaries that use Security.framework (cgo) and any other tool that ignores `SSL_CERT_FILE` and goes straight to the system trust store.
+
+**Leaf certs are still per-hostname, per-session.** The persistent CA only means the *root of trust* doesn't change — individual leaf certs are generated on-the-fly when the proxy sees a new SNI hostname, cached in memory for the session, and discarded on exit.
+
+**Security note:** The CA private key lives at `~/.closedshell/ca-key.pem`. Anyone with access to this file can generate trusted certs for any hostname on your machine. This is acceptable because ClosedShell's threat model is about protecting *remote* systems from your agent, not protecting your machine from local attackers. If someone has access to your home directory, you have bigger problems.
+
+---
+
 ## Session Lifecycle
 
 ```
 closedshell <agent-command>
 
 1. Lookup working directory in sessions.db → resume or create session
-2. Generate session-scoped CA cert/key (new session) or reuse session ID (resume)
-3. Write CA cert to sandbox tmpdir
+2. Load persistent CA from ~/.closedshell/ca.pem (or generate + trust on first run)
+3. Write combined trust store (CA + system roots) to sandbox tmpdir
 4. Generate seatbelt profile (.sb file)
 5. Start MITM proxy on localhost:8443
 6. Start Unix socket listener for `ask` CLI
@@ -529,7 +546,7 @@ Every proxy decision and `ask` CLI interaction produces a log entry. Common enve
 |---|---|
 | `tokio` | Async runtime for proxy + daemon |
 | `rustls` | TLS termination + upstream TLS |
-| `rcgen` | Session CA + dynamic cert generation per SNI |
+| `rcgen` | Persistent CA + dynamic leaf cert generation per SNI |
 | `hyper` | HTTP parsing in the proxy |
 | `reqwest` | Judge client (OpenAI-compatible API calls) |
 | `serde` / `serde_yaml` | Config, permission tree serialization |
@@ -587,12 +604,12 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 
 | # | Test | Pass condition |
 |---|------|---------------|
-| P1 | Agent runs `curl https://httpbin.org/get` through proxy | Proxy intercepts: TLS terminated with session CA, request logged, action parsed as `net:GET:httpbin.org/get` |
+| P1 | Agent runs `curl https://httpbin.org/get` through proxy | Proxy intercepts: TLS terminated with persistent CA, request logged, action parsed as `net:GET:httpbin.org/get` |
 | P2 | Agent runs `aws s3 ls` through proxy (no permission in tree) | Proxy parses `aws[profile=...]:s3:ListBuckets`, returns deny (no judge yet in Section 1) |
 | P3 | Manually add `permit aws[profile=*]:s3:List*` to tree, re-run `aws s3 ls` | Proxy matches permit, forwards request, agent gets bucket list |
 | P4 | Agent makes request to unknown host | Proxy parses as `net:METHOD:host/path`, returns deny |
-| P5 | Verify session CA is unique per session | Two `closedshell` invocations with `sessions reset` between produce different CA fingerprints |
-| P6 | Verify upstream TLS works | Proxy connects to real upstream with system trust store (not session CA) |
+| P5 | Verify CA is persistent | Two `closedshell` invocations reuse the same CA from `~/.closedshell/ca.pem` |
+| P6 | Verify upstream TLS works | Proxy connects to real upstream with system trust store (not ClosedShell CA) |
 
 ### Session Lifecycle
 
