@@ -94,3 +94,16 @@ impl DecisionMaker for DenyContaining {
         }
     }
 }
+
+/// Mock decider: always denies with a very large reason string (for testing large response bodies).
+pub struct LargeDenyDecider {
+    pub reason_size: usize,
+}
+
+impl DecisionMaker for LargeDenyDecider {
+    fn evaluate(&self, _action: &Action) -> Verdict {
+        Verdict::Deny {
+            reason: "x".repeat(self.reason_size),
+        }
+    }
+}
