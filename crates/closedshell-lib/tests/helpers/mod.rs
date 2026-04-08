@@ -53,13 +53,10 @@ impl TestProxy {
     /// Build a reqwest client that trusts this proxy's session CA and routes
     /// all HTTPS traffic through the proxy.
     pub fn client(&self) -> reqwest::Client {
-        let ca_cert =
-            reqwest::Certificate::from_pem(self.ca.ca_pem().as_bytes()).unwrap();
+        let ca_cert = reqwest::Certificate::from_pem(self.ca.ca_pem().as_bytes()).unwrap();
 
         reqwest::Client::builder()
-            .proxy(
-                reqwest::Proxy::https(format!("http://127.0.0.1:{}", self.port)).unwrap(),
-            )
+            .proxy(reqwest::Proxy::https(format!("http://127.0.0.1:{}", self.port)).unwrap())
             .add_root_certificate(ca_cert)
             .http1_only()
             .build()

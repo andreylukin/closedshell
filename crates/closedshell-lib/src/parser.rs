@@ -142,11 +142,7 @@ fn try_parse_gcp(req: &RequestInfo) -> Option<Action> {
     // GCP REST paths look like:
     // /compute/v1/projects/{project}/zones/{zone}/instances/{id}
     // /storage/v1/b/{bucket}/o/{object}
-    let path_segments: Vec<&str> = req
-        .path
-        .trim_start_matches('/')
-        .split('/')
-        .collect();
+    let path_segments: Vec<&str> = req.path.trim_start_matches('/').split('/').collect();
 
     // Extract project from path if present
     let project = path_segments
@@ -200,7 +196,9 @@ fn parse_gcp_operation(service: &str, method: &str, segments: &[&str]) -> String
         }
         // This is either a resource type or an ID
         // Heuristic: resource types are alphabetic, IDs contain digits/hyphens
-        if seg.chars().all(|c| c.is_ascii_alphabetic() || c == '-' || c == '_')
+        if seg
+            .chars()
+            .all(|c| c.is_ascii_alphabetic() || c == '-' || c == '_')
             && !seg.is_empty()
         {
             resources.push(seg);
@@ -438,10 +436,7 @@ mod tests {
             "/compute/v1/projects/prod-project-123/zones/us-east1-b/instances",
         );
         let action = parse_action(&req);
-        assert_eq!(
-            action.qualifier.get("project").unwrap(),
-            "prod-project-123"
-        );
+        assert_eq!(action.qualifier.get("project").unwrap(), "prod-project-123");
     }
 
     #[test]

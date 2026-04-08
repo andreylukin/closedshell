@@ -1,6 +1,5 @@
 //! Seatbelt sandbox: .sb profile generation and sandbox-exec wrapper.
 
-
 /// Generate a seatbelt (.sb) profile string.
 ///
 /// Strategy: allow everything by default, deny only network.

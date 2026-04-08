@@ -29,8 +29,6 @@
 │  │                                                     ││
 │  │  Seatbelt profile enforces:                         ││
 │  │  • deny network-outbound (except localhost:8443)    ││
-│  │  • deny file-write* (except sandbox tmpdir)         ││
-│  │  • process-exec allowlist                           ││
 │  │                                                     ││
 │  │  HTTP_PROXY / HTTPS_PROXY → localhost:8443          ││
 │  │                                                     ││
@@ -83,28 +81,9 @@ Agent runs: aws s3 ls
   └─ Agent gets response. Total added latency: ~1ms (cached) / ~100ms (first access)
 ```
 
-### Process Execution (seatbelt, static)
+### Process Execution (future phase)
 
-Seatbelt controls which binaries can execute via `process-exec` rules. This is a static allowlist — no runtime supervisor callback like Linux's seccomp-notify.
-
-```scheme
-(allow process-exec
-  (literal "/bin/sh")
-  (literal "/bin/bash")
-  (literal "/usr/bin/env")
-  (literal "/usr/local/bin/aws")
-  (literal "/usr/local/bin/ask")
-  ;; ... agent-specific binaries
-)
-```
-
-### File System (seatbelt, static)
-
-```scheme
-(allow file-read*)                                    ; read anything
-(deny file-write*)                                    ; deny writes by default
-(allow file-write* (subpath "/tmp/closedshell-XXXX")) ; except sandbox tmpdir
-```
+Process-exec allowlisting via seatbelt `process-exec` rules is planned for a future phase. Currently the seatbelt profile only enforces network rules — the proxy is the real enforcement boundary.
 
 ---
 
@@ -602,10 +581,7 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 |---|------|---------------|
 | S1 | Process inside sandbox runs `curl https://example.com` | Connection refused or timeout — seatbelt blocks outbound |
 | S2 | Process inside sandbox runs `curl http://localhost:8443` | Connection succeeds — proxy is reachable |
-| S3 | Process inside sandbox runs `touch /tmp/outside-sandbox/file` | Permission denied — seatbelt blocks writes outside tmpdir |
-| S4 | Process inside sandbox runs `touch $SANDBOX_TMPDIR/file` | Succeeds — tmpdir is writable |
-| S5 | Process inside sandbox runs `/usr/bin/python3` (not in allowlist) | Exec denied by seatbelt |
-| S6 | Process inside sandbox runs `/bin/sh` (in allowlist) | Exec succeeds |
+| S3 | Process inside sandbox runs `/bin/sh` | Exec succeeds — no process-exec restrictions in YOLO phase |
 
 ### Proxy + TLS
 
@@ -659,7 +635,7 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 |---|------|---------------|
 | F1 | Agent runs `ask write /Users/andrey/repos/test.txt "hello"` with matching permit | Daemon writes file on host side, agent gets confirmation |
 | F2 | Agent runs `ask write /Users/andrey/.ssh/config "..."` with forbid on dotfiles | DENY, file not written |
-| F3 | Agent runs `echo hi > /Users/andrey/repos/test.txt` directly (no `ask`) | Permission denied — Seatbelt blocks writes outside tmpdir |
+| F3 | Agent runs `echo hi > /Users/andrey/repos/test.txt` directly (no `ask`) | Succeeds — file-write restrictions deferred to future phase |
 | F4 | Agent runs `cat /Users/andrey/repos/test.txt` directly | Succeeds — Seatbelt allows reads |
 | F5 | Agent runs `ask read /Users/andrey/.ssh/id_rsa` with forbid on `.ssh/*` | DENY, content not returned |
 | F6 | Agent runs `cat /Users/andrey/.ssh/id_rsa` directly | Succeeds (Seatbelt allows reads) — this is the audit gap we accept |

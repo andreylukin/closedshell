@@ -10,8 +10,8 @@ use crate::tls::SessionCA;
 
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -140,11 +140,7 @@ async fn handle_client(
     }
 
     let target = parts[1]; // host:port
-    let hostname = target
-        .split(':')
-        .next()
-        .unwrap_or(target)
-        .to_string();
+    let hostname = target.split(':').next().unwrap_or(target).to_string();
 
     // Read and discard remaining headers until empty line
     loop {

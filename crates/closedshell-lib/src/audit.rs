@@ -60,10 +60,7 @@ impl AuditLog {
     pub fn open(dir: &Path, session_id: &str) -> anyhow::Result<Self> {
         let filename = format!("closedshell-{}.log", session_id);
         let path = dir.join(&filename);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             file: Mutex::new(file),
             path,
@@ -120,7 +117,12 @@ mod tests {
         // Read back and verify
         let contents = std::fs::read_to_string(&log.path).unwrap();
         let lines: Vec<&str> = contents.lines().collect();
-        assert_eq!(lines.len(), 2, "ERROR: expected 2 log lines, got {}", lines.len());
+        assert_eq!(
+            lines.len(),
+            2,
+            "ERROR: expected 2 log lines, got {}",
+            lines.len()
+        );
 
         // Verify each line is valid JSON
         for (i, line) in lines.iter().enumerate() {

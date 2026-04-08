@@ -137,7 +137,6 @@ impl Default for JudgeConfig {
     }
 }
 
-
 /// Resolve `~` prefix in a path to the user's home directory.
 pub fn resolve_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
@@ -303,8 +302,14 @@ sandbox:
 
         let home = std::env::var("HOME").unwrap();
         let cred = &config.sandbox.credentials[0];
-        assert_eq!(cred.source.as_deref().unwrap(), format!("{}/.aws/credentials", home));
-        assert_eq!(cred.mount.as_deref().unwrap(), format!("{}/.aws/credentials", home));
+        assert_eq!(
+            cred.source.as_deref().unwrap(),
+            format!("{}/.aws/credentials", home)
+        );
+        assert_eq!(
+            cred.mount.as_deref().unwrap(),
+            format!("{}/.aws/credentials", home)
+        );
     }
 
     #[test]

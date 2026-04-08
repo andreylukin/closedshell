@@ -4,8 +4,7 @@
 //! per SNI hostname, signed by the session CA.
 
 use rcgen::{
-    CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
-    SanType,
+    CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -39,12 +38,10 @@ impl SessionCA {
         params
             .distinguished_name
             .push(DnType::OrganizationName, "ClosedShell");
-        params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-        ];
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2030, 1, 1);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let now = OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::hours(1);
+        params.not_after = now + time::Duration::days(1);
 
         let ca_cert = params.self_signed(&key_pair)?;
         let ca_cert_pem = ca_cert.pem();
@@ -76,9 +73,7 @@ impl SessionCA {
 
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::NoCa;
-        params
-            .distinguished_name
-            .push(DnType::CommonName, hostname);
+        params.distinguished_name.push(DnType::CommonName, hostname);
         params.subject_alt_names = vec![SanType::DnsName(hostname.try_into()?)];
         params.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,

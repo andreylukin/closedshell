@@ -6,6 +6,7 @@ use closedshell_lib::sandbox;
 use closedshell_lib::tls::SessionCA;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Parser)]
 #[command(name = "closedshell", about = "Sandbox for AI agents")]
@@ -125,7 +126,10 @@ async fn main() -> anyhow::Result<()> {
     // 6b. Add session CA to macOS login keychain (removed on cleanup)
     let security_status = std::process::Command::new("security")
         .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
-        .arg(PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Keychains/login.keychain-db"))
+        .arg(
+            PathBuf::from(std::env::var("HOME").unwrap())
+                .join("Library/Keychains/login.keychain-db"),
+        )
         .arg(&ca_pem_path)
         .status();
     let ca_in_keychain = matches!(security_status, Ok(s) if s.success());
@@ -135,7 +139,11 @@ async fn main() -> anyhow::Result<()> {
 
     // 7. Print MOTD
     if config.sandbox.motd {
-        let mode = if config.sandbox.yolo { "yolo" } else { "enforcing" };
+        let mode = if config.sandbox.yolo {
+            "yolo"
+        } else {
+            "enforcing"
+        };
         eprintln!("[closedshell] session {} (new)", session_id);
         if let Some(ref task) = cli.task {
             eprintln!("[closedshell] task: {}", task);
@@ -159,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
     // 9. Build and exec sandbox-exec with environment
     let proxy_url = format!("http://localhost:{}", actual_port);
 
-    let mut cmd = std::process::Command::new("sandbox-exec");
+    let mut cmd = tokio::process::Command::new("sandbox-exec");
     cmd.arg("-f")
         .arg(&profile_path)
         .arg("env")
@@ -168,15 +176,15 @@ async fn main() -> anyhow::Result<()> {
         .arg(format!("SSL_CERT_FILE={}", ca_pem_path.display()))
         .arg(format!("SSL_CERT_DIR={}", tmpdir.display()))
         .arg("GODEBUG=x509usefallbackroots=1")
-        .arg(format!(
-            "CLOSEDSHELL_SOCKET={}/ask.sock",
-            tmpdir.display()
-        ))
+        .arg(format!("CLOSEDSHELL_SOCKET={}/ask.sock", tmpdir.display()))
         .arg(format!("CLOSEDSHELL_SESSION={}", session_id));
 
     // Pass through credential env vars
     for cred in &config.sandbox.credentials {
-        if matches!(cred.mount_type, closedshell_lib::config::CredentialType::Env) {
+        if matches!(
+            cred.mount_type,
+            closedshell_lib::config::CredentialType::Env
+        ) {
             for var in &cred.vars {
                 if let Ok(val) = std::env::var(var) {
                     cmd.arg(format!("{}={}", var, val));
@@ -194,10 +202,29 @@ async fn main() -> anyhow::Result<()> {
         "sandbox starting"
     );
 
-    // 10. Wait for child process
-    let status = cmd.status()?;
+    // 10. Wait for child process, handling signals for clean shutdown
+    let mut child = cmd.spawn()?;
 
-    // 11. Cleanup
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
+
+    let exit_code = tokio::select! {
+        status = child.wait() => {
+            status?.code().unwrap_or(1)
+        }
+        _ = sigint.recv() => {
+            tracing::info!("received SIGINT, cleaning up");
+            let _ = child.kill().await;
+            1
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("received SIGTERM, cleaning up");
+            let _ = child.kill().await;
+            1
+        }
+    };
+
+    // 11. Cleanup (always runs, even on signal)
     let duration = start_time.elapsed();
     audit.log(AuditPayload::SessionEnd {
         duration_s: duration.as_secs(),
@@ -225,5 +252,5 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Exit with child's exit code
-    std::process::exit(status.code().unwrap_or(1));
+    std::process::exit(exit_code);
 }

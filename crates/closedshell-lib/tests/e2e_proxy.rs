@@ -10,11 +10,7 @@ async fn test_deny_returns_403() {
     let tp = TestProxy::start(Arc::new(DenyContaining("example.com".into()))).await;
     let client = tp.client();
 
-    let resp = client
-        .get("https://example.com/test")
-        .send()
-        .await
-        .unwrap();
+    let resp = client.get("https://example.com/test").send().await.unwrap();
     assert_eq!(resp.status(), 403);
 
     let body = resp.text().await.unwrap();
@@ -22,10 +18,7 @@ async fn test_deny_returns_403() {
 
     let decisions = tp.read_decisions();
     assert_eq!(decisions.len(), 1);
-    assert!(decisions[0]["result"]
-        .as_str()
-        .unwrap()
-        .contains("deny"));
+    assert!(decisions[0]["result"].as_str().unwrap().contains("deny"));
     assert_eq!(decisions[0]["action"], "net:GET:example.com/test");
 }
 
@@ -94,11 +87,7 @@ async fn test_generic_action_parsing_e2e() {
     let tp = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
     let client = tp.client();
 
-    let resp = client
-        .get("https://httpbin.org/get")
-        .send()
-        .await
-        .unwrap();
+    let resp = client.get("https://httpbin.org/get").send().await.unwrap();
     assert_eq!(resp.status(), 403);
 
     let decisions = tp.read_decisions();
@@ -146,14 +135,8 @@ async fn test_selective_deny() {
 
     let decisions = tp.read_decisions();
     assert_eq!(decisions.len(), 2);
-    assert!(decisions[0]["result"]
-        .as_str()
-        .unwrap()
-        .contains("allow"));
-    assert!(decisions[1]["result"]
-        .as_str()
-        .unwrap()
-        .contains("deny"));
+    assert!(decisions[0]["result"].as_str().unwrap().contains("allow"));
+    assert!(decisions[1]["result"].as_str().unwrap().contains("deny"));
 }
 
 /// Stats counter tracks total decisions.
@@ -181,9 +164,6 @@ async fn test_yolo_allows_all() {
 
     let decisions = tp.read_decisions();
     assert_eq!(decisions.len(), 1);
-    assert!(decisions[0]["result"]
-        .as_str()
-        .unwrap()
-        .contains("allow"));
+    assert!(decisions[0]["result"].as_str().unwrap().contains("allow"));
     assert_eq!(decisions[0]["action"], "net:GET:example.com/yolo");
 }
