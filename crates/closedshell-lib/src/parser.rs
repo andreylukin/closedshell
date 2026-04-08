@@ -47,6 +47,9 @@ pub fn parse_action(req: &RequestInfo) -> Action {
     if let Some(action) = try_parse_azure(req) {
         return action;
     }
+    if let Some(action) = try_parse_k8s(req) {
+        return action;
+    }
 
     parse_generic(req)
 }
@@ -350,6 +353,124 @@ fn try_parse_azure(req: &RequestInfo) -> Option<Action> {
         qualifier,
         service: service.into(),
         operation,
+        raw,
+    })
+}
+
+/// Known Kubernetes resource types for detection heuristic.
+const K8S_RESOURCES: &[&str] = &[
+    "pods",
+    "services",
+    "deployments",
+    "replicasets",
+    "statefulsets",
+    "daemonsets",
+    "jobs",
+    "cronjobs",
+    "configmaps",
+    "secrets",
+    "nodes",
+    "namespaces",
+    "ingresses",
+    "networkpolicies",
+    "persistentvolumeclaims",
+    "serviceaccounts",
+    "roles",
+    "rolebindings",
+    "clusterroles",
+    "clusterrolebindings",
+];
+
+fn try_parse_k8s(req: &RequestInfo) -> Option<Action> {
+    // Detect K8s API paths
+    if !req.path.starts_with("/api/") && !req.path.starts_with("/apis/") {
+        return None;
+    }
+
+    // Split path, strip query string from last segment
+    let path_no_query = req.path.split('?').next().unwrap_or(&req.path);
+    let segments: Vec<&str> = path_no_query
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Find the resource type and optional name.
+    // Patterns:
+    //   /api/v1/namespaces/{ns}/{resource}[/{name}]
+    //   /api/v1/{resource}[/{name}]
+    //   /apis/{group}/{version}/namespaces/{ns}/{resource}[/{name}]
+    //   /apis/{group}/{version}/{resource}[/{name}]
+    let mut namespace: Option<String> = None;
+    let mut resource: Option<&str> = None;
+    let mut resource_name: Option<&str> = None;
+
+    // Find "namespaces" segment to extract ns, then resource follows
+    if let Some(ns_idx) = segments.iter().position(|&s| s == "namespaces") {
+        if ns_idx + 1 < segments.len() {
+            namespace = Some(segments[ns_idx + 1].to_string());
+        }
+        if ns_idx + 2 < segments.len() {
+            resource = Some(segments[ns_idx + 2]);
+        }
+        if ns_idx + 3 < segments.len() {
+            resource_name = Some(segments[ns_idx + 3]);
+        }
+    } else {
+        // No namespace — cluster-scoped resource
+        // /api/v1/{resource}[/{name}] or /apis/{group}/{version}/{resource}[/{name}]
+        let start = if segments.first() == Some(&"apis") {
+            3
+        } else {
+            2
+        };
+        if start < segments.len() {
+            resource = Some(segments[start]);
+        }
+        if start + 1 < segments.len() {
+            resource_name = Some(segments[start + 1]);
+        }
+    }
+
+    let resource = resource?;
+
+    // Require known K8s resource type to avoid false positives
+    if !K8S_RESOURCES.contains(&resource) {
+        return None;
+    }
+
+    // Map HTTP method to K8s verb
+    let verb = if req.method == "GET" {
+        if req.query_params.get("watch").map(|v| v.as_str()) == Some("true") {
+            "watch"
+        } else if resource_name.is_some() {
+            "get"
+        } else {
+            "list"
+        }
+    } else {
+        match req.method.as_str() {
+            "POST" => "create",
+            "PUT" => "update",
+            "PATCH" => "patch",
+            "DELETE" => "delete",
+            other => other,
+        }
+    };
+
+    let mut qualifier = HashMap::new();
+    let raw = if let Some(ns) = &namespace {
+        qualifier.insert("ns".into(), ns.clone());
+        format!("k8s[ns={}]:{}:{}", ns, resource, verb)
+    } else {
+        format!("k8s:{}:{}", resource, verb)
+    };
+
+    Some(Action {
+        provider: "k8s".into(),
+        qualifier,
+        service: resource.into(),
+        operation: verb.into(),
         raw,
     })
 }
@@ -674,6 +795,72 @@ mod tests {
     #[test]
     fn test_non_azure_not_matched() {
         let req = make_request("GET", "azure.microsoft.com", "/something");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "net");
+    }
+
+    // -- Kubernetes tests --
+
+    #[test]
+    fn test_k8s_list_pods() {
+        let req = make_request("GET", "k8s.local", "/api/v1/namespaces/default/pods");
+        let action = parse_action(&req);
+        assert_eq!(action.canonical(), "k8s[ns=default]:pods:list");
+        assert_eq!(action.provider, "k8s");
+        assert_eq!(action.service, "pods");
+        assert_eq!(action.operation, "list");
+        assert_eq!(action.qualifier.get("ns").unwrap(), "default");
+    }
+
+    #[test]
+    fn test_k8s_get_pod() {
+        let req = make_request("GET", "k8s.local", "/api/v1/namespaces/default/pods/my-pod");
+        let action = parse_action(&req);
+        assert_eq!(action.canonical(), "k8s[ns=default]:pods:get");
+    }
+
+    #[test]
+    fn test_k8s_delete_deployment() {
+        let req = make_request(
+            "DELETE",
+            "k8s.local",
+            "/apis/apps/v1/namespaces/prod/deployments/web",
+        );
+        let action = parse_action(&req);
+        assert_eq!(action.canonical(), "k8s[ns=prod]:deployments:delete");
+    }
+
+    #[test]
+    fn test_k8s_create_service() {
+        let req = make_request("POST", "k8s.local", "/api/v1/namespaces/default/services");
+        let action = parse_action(&req);
+        assert_eq!(action.canonical(), "k8s[ns=default]:services:create");
+    }
+
+    #[test]
+    fn test_k8s_list_nodes() {
+        let req = make_request("GET", "k8s.local", "/api/v1/nodes");
+        let action = parse_action(&req);
+        assert_eq!(action.canonical(), "k8s:nodes:list");
+        assert!(action.qualifier.is_empty());
+    }
+
+    #[test]
+    fn test_k8s_watch_pods() {
+        let mut req = make_request("GET", "k8s.local", "/api/v1/namespaces/default/pods");
+        req.query_params.insert("watch".into(), "true".into());
+        let action = parse_action(&req);
+        assert_eq!(action.canonical(), "k8s[ns=default]:pods:watch");
+    }
+
+    #[test]
+    fn test_non_k8s_not_matched() {
+        // A random host with /api/v1/ but unknown resource type should NOT match K8s
+        let req = make_request(
+            "GET",
+            "api.example.com",
+            "/api/v1/namespaces/default/widgets",
+        );
         let action = parse_action(&req);
         assert_eq!(action.provider, "net");
     }
