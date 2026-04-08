@@ -48,7 +48,13 @@ fn seatbelt_blocks_outbound_network() {
     // except localhost:8443. Use --connect-timeout to avoid hanging.
     let (code, _, _) = sandbox_run(
         &profile,
-        &["curl", "-s", "--connect-timeout", "2", "https://example.com"],
+        &[
+            "curl",
+            "-s",
+            "--connect-timeout",
+            "2",
+            "https://example.com",
+        ],
     );
     assert_ne!(code, 0, "outbound network should be blocked by seatbelt");
 }

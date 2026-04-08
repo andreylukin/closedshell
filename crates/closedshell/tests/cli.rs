@@ -69,8 +69,7 @@ fn no_motd_flag_suppresses_banner() {
 
 #[test]
 fn task_flag_shows_in_motd() {
-    let (code, _, stderr) =
-        run_closedshell(&["--yolo", "--task", "fix the bug", "echo", "ok"]);
+    let (code, _, stderr) = run_closedshell(&["--yolo", "--task", "fix the bug", "echo", "ok"]);
     assert_eq!(code, 0);
     assert!(
         stderr.contains("[closedshell] task: fix the bug"),
@@ -94,9 +93,7 @@ fn audit_log_is_created() {
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("closedshell-")
+            e.file_name().to_string_lossy().starts_with("closedshell-")
                 && e.file_name().to_string_lossy().ends_with(".log")
         })
         .collect();
