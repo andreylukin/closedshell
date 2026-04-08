@@ -44,7 +44,6 @@ Set at `closedshell --task "investigate 503s" pi`. Updated by the agent via `ask
 "session_context": {
   "task": "investigate 503s in us-east-1",
   "created": "2026-04-04T10:00:00Z",
-  "credentials_available": ["aws:profile=prod", "aws:profile=dev"]
 }
 ```
 
@@ -110,7 +109,7 @@ Last 20 decisions, compact format. Gives the judge signal for pattern detection 
 Fields:
 - `risk_tier` — `safe`, `moderate`, or `dangerous`. Derived from the baked-in risk taxonomy (see [proxy.md § Risk Taxonomy](proxy.md#baked-in-risk-taxonomy)). Tells the judge the provider's own classification of this action.
 - `implicit` — whether this came from an explicit `ask allow` or from an implicit ask via the proxy. The judge may use this signal (e.g., require `ask plan` for dangerous actions even if the agent just tried to run them).
-- `credentials_available` in `session_context` — derived from credential mounts in config. Tells the judge which providers/profiles are available, so it can scope permits correctly.
+- `session_context` — the current task and session metadata. Tells the judge what the agent is trying to accomplish.
 
 ---
 
@@ -155,7 +154,7 @@ Same context envelope as all judge calls, plus the plan description:
   "type": "plan",
   "description": "rollback ECS deployment in us-east-1",
   "current_tree": ["aws[profile=prod]:ecs:Describe*", "aws[profile=prod]:ecs:List*"],
-  "session_context": {"task": "investigate 503s in us-east-1", "credentials_available": ["aws:profile=prod", "aws:profile=dev"]},
+  "session_context": {"task": "investigate 503s in us-east-1"},
   "history": [...]
 }
 ```

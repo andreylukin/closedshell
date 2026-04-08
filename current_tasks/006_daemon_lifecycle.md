@@ -22,7 +22,7 @@
    c. Remove tmpdir
    d. Exit with child's exit code
 4. Handle SIGTERM/SIGINT gracefully — forward to child, then cleanup
-5. Set up credential mounts: for each `type: env` credential, pass vars through to sandbox env. For `type: file`, the seatbelt profile already allows file-read* so no special handling needed.
+5. Pass through configured env vars (`passthrough_env`) to the sandbox process.
 
 **Dependencies:** tasks 001-005
 

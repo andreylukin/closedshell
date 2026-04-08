@@ -1,4 +1,4 @@
-# HTTPS Proxy + Credential Mounts
+# HTTPS Proxy
 
 Transparent MITM proxy. Session-scoped CA cert injected into sandbox at creation. The proxy is the primary enforcement boundary — it works identically on both Linux and macOS.
 
@@ -10,7 +10,7 @@ Transparent MITM proxy. Session-scoped CA cert injected into sandbox at creation
 - Parse cloud provider API calls into structured actions
 - Check action against permission tree (forbid → permit → implicit ask → deny). See [permission-tree.md § Evaluation Algorithm](permission-tree.md#evaluation-algorithm).
 - For unknown actions: submit implicit ask to judge
-- Forward approved requests with credentials as-is (passthrough — see [§ Credential Passthrough](#credential-passthrough))
+- Forward approved requests with credentials as-is (passthrough)
 - Log all decisions to audit log (see [architecture.md § Audit Log](architecture.md#audit-log))
 - Support WebSocket/streaming (see [§ Streaming and WebSocket](#streaming-and-websocket))
 
@@ -33,7 +33,7 @@ Parsers are pluggable. Unknown APIs fall back to `net:<METHOD>:<host>/<path>`.
 
 ## Credential Qualifier Format
 
-`provider[key=value]:action`. The qualifier is derived from which credential mount the request uses (AWS profile name, GCP project, K8s context, etc.). This makes the permission tree credential-aware — `aws[profile=dev]:s3:GetObject` and `aws[profile=prod]:s3:GetObject` are distinct actions with distinct permissions. Generic `net:` actions have no qualifier.
+`provider[key=value]:action`. The qualifier is derived from request context (AWS profile name from signing headers, GCP project from URL, K8s context, etc.). This makes the permission tree credential-aware — `aws[profile=dev]:s3:GetObject` and `aws[profile=prod]:s3:GetObject` are distinct actions with distinct permissions. Generic `net:` actions have no qualifier.
 
 ---
 
@@ -95,51 +95,21 @@ The `X-ClosedShell-Denied` header lets agents programmatically distinguish proxy
 
 ## Credential Passthrough
 
-Credentials are **passed through**, not injected. The agent's tools (aws, gcloud, kubectl) pick up credentials from the mounted files and environment variables and include them in outbound requests normally. The proxy forwards these as-is.
+Credentials are **passed through**, not injected. The agent's tools (aws, gcloud, kubectl) pick up credentials from environment variables and filesystem (seatbelt allows all reads) and include them in outbound requests normally. The proxy forwards these as-is.
 
-The proxy does not strip, replace, or add credentials. The sandbox boundary (seatbelt + proxy) ensures the agent can't use credentials to bypass the proxy — all network traffic is forced through it regardless.
-
----
-
-## Credential Mounts
-
-Credentials are mounted directly into the sandbox. The agent can read them, but **cannot use them to bypass the proxy** — the sandbox boundary forces all network traffic through the proxy regardless.
+The proxy does not strip, replace, or add credentials. All network traffic is forced through the proxy regardless — the agent can hold credentials but can only use them through the proxy's permission checks.
 
 ### Configuration
 
+Environment variables are forwarded to the sandbox via `passthrough_env`:
+
 ```yaml
 sandbox:
-  credentials:
-    - type: file
-      source: ~/.aws/credentials
-      mount: ~/.aws/credentials
-      readonly: true
-
-    - type: env
-      vars: [OPENAI_API_KEY, GITHUB_TOKEN]
-
-    - type: socket
-      source: $SSH_AUTH_SOCK
-      mount: /tmp/ssh-agent.sock
-
-    - type: oauth
-      provider: gcp
-      token_path: ~/.config/gcloud/
-      refresh_interval: 45m    # daemon refreshes on host, remounts
+  passthrough_env:
+    - OPENAI_API_KEY
+    - GITHUB_TOKEN
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
 ```
 
-### Mount Types
-
-| Type | Example | Behavior |
-|------|---------|----------|
-| `file` | `~/.aws/credentials`, `~/.kube/config` | Read-only bind mount into sandbox |
-| `env` | `OPENAI_API_KEY`, `GITHUB_TOKEN` | Passed as environment variables at sandbox creation |
-| `socket` | `SSH_AUTH_SOCK`, Docker socket | Socket mounted into sandbox |
-| `oauth` | GCP, Azure AD | Daemon refreshes tokens on host side on `refresh_interval`, remounts into sandbox. Agent always sees a valid token. |
-
-### Security Model
-
-- Agent tools work naturally — `aws`, `gcloud`, `kubectl` find credentials where they expect them.
-- All network traffic still goes through the proxy, which enforces the permission tree.
-- Even if the agent reads raw credentials, it cannot make network calls that bypass the proxy.
-- OAuth tokens that expire mid-session are refreshed by the daemon on the host side — the agent doesn't know or care.
+The seatbelt profile allows all file reads, so credential files like `~/.aws/credentials` and `~/.kube/config` are accessible to the agent without special configuration.

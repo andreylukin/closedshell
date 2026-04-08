@@ -552,10 +552,10 @@ ask            (in-sandbox CLI, talks to daemon over Unix socket)
 
 | Capability | Linux (seccomp-notify) | macOS (seatbelt) |
 |---|---|---|
-| Runtime exec interception | Supervisor callback per execve | Static allowlist only |
+| Runtime exec interception | Supervisor callback per execve | Not enforced (proxy is the boundary) |
 | Namespace isolation (pid/mount/net) | Full | None (process-level sandbox) |
 | Network interception | iptables + transparent proxy | Env-var proxy + seatbelt deny |
-| File isolation | Mount namespace + overlayfs | Seatbelt path rules |
+| File isolation | Mount namespace + overlayfs | Not enforced (proxy is the boundary) |
 | Credential isolation | Never in sandbox filesystem | Never in sandbox filesystem |
 | Deployment friction | Needs Linux | No root, no extensions, ships with macOS |
 
@@ -600,7 +600,7 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 |---|------|---------------|
 | L1 | `closedshell /bin/sh` | Sandbox starts, proxy listening, Unix socket exists, MOTD displayed |
 | L2 | Agent exits | Proxy stops, tmpdir removed, socket gone |
-| L3 | `closedshell pi` with credential mounts in config | `~/.aws/credentials` readable inside sandbox, env vars set |
+| L3 | `closedshell pi` with `passthrough_env` in config | Configured env vars available inside sandbox |
 | L4 | Kill daemon while agent is running | Agent's next network call fails cleanly (connection refused, not hang) |
 
 ### `ask` CLI + IPC
