@@ -49,6 +49,61 @@ fn generate_session_id() -> String {
     format!("{:08x}", (t & 0xFFFF_FFFF) as u32)
 }
 
+/// Add a CA certificate to the macOS user trust store without a password prompt.
+///
+/// The `security add-trusted-cert` CLI always prompts for a password on modern
+/// macOS. Instead, we compile a tiny Swift program that calls
+/// `SecTrustSettingsSetTrustSettings` with the `.user` domain, which doesn't
+/// require authentication. The compiled binary is cached next to the CA.
+fn trust_ca_macos(ca_pem_path: &std::path::Path) -> anyhow::Result<()> {
+    let cs_dir = ca_pem_path.parent().unwrap();
+    let helper_bin = cs_dir.join("trust-cert");
+
+    // Compile the Swift helper once, reuse on subsequent calls
+    if !helper_bin.exists() {
+        let swift_src = cs_dir.join("trust-cert.swift");
+        std::fs::write(
+            &swift_src,
+            r#"import Foundation
+import Security
+guard CommandLine.arguments.count == 2 else { exit(1) }
+let url = URL(fileURLWithPath: CommandLine.arguments[1])
+let pem = try! String(contentsOf: url, encoding: .utf8)
+    .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
+    .replacingOccurrences(of: "-----END CERTIFICATE-----", with: "")
+    .replacingOccurrences(of: "\n", with: "")
+guard let der = Data(base64Encoded: pem),
+      let cert = SecCertificateCreateWithData(nil, der as CFData) else { exit(1) }
+guard SecTrustSettingsSetTrustSettings(cert, .user, nil) == errSecSuccess else { exit(1) }
+"#,
+        )?;
+
+        let status = std::process::Command::new("swiftc")
+            .args(["-O", "-o"])
+            .arg(&helper_bin)
+            .arg(&swift_src)
+            .status()?;
+
+        // Clean up source regardless
+        let _ = std::fs::remove_file(&swift_src);
+
+        if !status.success() {
+            let _ = std::fs::remove_file(&helper_bin);
+            anyhow::bail!("swiftc failed");
+        }
+    }
+
+    let status = std::process::Command::new(&helper_bin)
+        .arg(ca_pem_path)
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("trust-cert helper failed")
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
@@ -90,18 +145,20 @@ async fn main() -> anyhow::Result<()> {
 
     let ca = Arc::new(SessionCA::load_or_create(&ca_cert_path, &ca_key_path)?);
 
-    // On first run, add CA to user trust store (no password required).
-    // Subsequent sessions reuse the same CA — no trust prompt needed.
+    // On first run, add CA to macOS user trust store.
+    // Uses Security.framework's user domain via a small Swift helper —
+    // unlike `security add-trusted-cert`, this doesn't prompt for a password.
     if is_new_ca {
-        let trusted = std::process::Command::new("security")
-            .args(["add-trusted-cert", "-r", "trustRoot"])
-            .arg(&ca_cert_path)
-            .status()
-            .is_ok_and(|s| s.success());
-        if trusted {
-            eprintln!("[closedshell] CA created and trusted — this is a one-time setup");
+        if let Err(e) = trust_ca_macos(&ca_cert_path) {
+            tracing::warn!("could not auto-trust CA: {e}");
+            eprintln!("[closedshell] CA created at {}", ca_cert_path.display());
+            eprintln!("[closedshell] Auto-trust failed. To trust manually (one-time), run:");
+            eprintln!(
+                "[closedshell]   security add-trusted-cert -r trustRoot {}",
+                ca_cert_path.display()
+            );
         } else {
-            tracing::warn!("could not add CA to user trust store — TLS interception may fail");
+            eprintln!("[closedshell] CA created and trusted (one-time setup)");
         }
     }
 
