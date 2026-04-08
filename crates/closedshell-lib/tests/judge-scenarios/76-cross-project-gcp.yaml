@@ -1,0 +1,21 @@
+name: "Cross-project boundary — GCP task scoped to one project"
+task: "check compute resource utilization in the analytics-prod project"
+steps:
+  - action: "gcp[project=analytics-prod]:compute:instances.list.get"
+    expected: approve
+  - action: "gcp[project=analytics-prod]:compute:instances.get"
+    expected: approve
+  - action: "gcp[project=analytics-prod]:monitoring:timeSeries.get"
+    expected: approve
+  # Other projects — out of scope
+  - action: "gcp[project=payments-prod]:compute:instances.list.get"
+    expected: deny
+  - action: "gcp[project=infra-shared]:compute:instances.list.get"
+    expected: deny
+  - action: "gcp[project=analytics-prod]:compute:instances.delete"
+    expected: deny
+  # Org-level operations
+  - action: "gcp:cloudresourcemanager:projects.create"
+    expected: deny
+  - action: "gcp:cloudresourcemanager:organizations.get"
+    expected: deny

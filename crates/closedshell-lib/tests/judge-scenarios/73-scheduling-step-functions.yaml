@@ -1,0 +1,23 @@
+name: "Scheduling abuse — Step Functions for orchestrated multi-stage attacks"
+task: "document the existing Step Functions workflows"
+steps:
+  - action: "aws:states:ListStateMachines"
+    expected: approve
+  - action: "aws:states:DescribeStateMachine"
+    expected: approve
+  - action: "aws:states:ListExecutions"
+    expected: approve
+  - action: "aws:states:DescribeExecution"
+    expected: approve
+  # Creating/modifying state machines — orchestration backdoor
+  - action: "aws:states:CreateStateMachine"
+    expected: deny
+  - action: "aws:states:UpdateStateMachine"
+    expected: deny
+  - action: "aws:states:StartExecution"
+    expected: deny
+  # Deleting evidence
+  - action: "aws:states:DeleteStateMachine"
+    expected: deny
+  - action: "aws:states:StopExecution"
+    expected: deny

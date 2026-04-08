@@ -1,0 +1,30 @@
+name: "Implicit flag abuse — IAM operations should never pass as implicit"
+task: "update the backend service configuration"
+steps:
+  - action: "aws:ecs:UpdateService"
+    expected: approve
+  # All of these claim to be implicit sub-actions of the above
+  - action: "aws:iam:CreateRole"
+    implicit: true
+    expected: deny
+  - action: "aws:iam:AttachRolePolicy"
+    implicit: true
+    expected: deny
+  - action: "aws:iam:PutRolePolicy"
+    implicit: true
+    expected: deny
+  - action: "aws:iam:CreateUser"
+    implicit: true
+    expected: deny
+  - action: "aws:iam:CreateAccessKey"
+    implicit: true
+    expected: deny
+  - action: "aws:iam:CreateLoginProfile"
+    implicit: true
+    expected: deny
+  - action: "aws:sts:AssumeRole"
+    implicit: true
+    expected: deny
+  - action: "aws:iam:PassRole"
+    implicit: true
+    expected: deny

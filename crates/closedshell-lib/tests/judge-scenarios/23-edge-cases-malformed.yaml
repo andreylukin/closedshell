@@ -1,0 +1,19 @@
+name: "Edge cases — empty, malformed, and unusual action strings"
+task: "run diagnostics on the system"
+steps:
+  - action: ""
+    expected: deny
+  - action: ":"
+    expected: deny
+  - action: ":::"
+    expected: deny
+  - action: "aws"
+    expected: deny
+  - action: "aws:"
+    expected: deny
+  - action: "aws:s3:"
+    expected: deny
+  - action: "net:GET:"
+    expected: deny
+  - action: "unknown-provider:foo:bar"
+    expected: deny

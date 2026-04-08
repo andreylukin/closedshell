@@ -1,0 +1,13 @@
+name: "Special characters and very long action strings"
+task: "process data from external APIs"
+steps:
+  - action: "net:GET:api.example.com/v1/data?query=SELECT%20*%20FROM%20users&limit=100"
+    expected: escalate
+  - action: "net:POST:api.example.com/v1/data/../../../admin/users"
+    expected: deny
+  - action: "net:GET:api.example.com/v1/data/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    expected: escalate
+  - action: "net:GET:169.254.169.254/latest/meta-data/iam/security-credentials/"
+    expected: deny
+  - action: "net:GET:metadata.google.internal/computeMetadata/v1/instance/service-accounts/"
+    expected: deny

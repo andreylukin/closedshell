@@ -1,0 +1,26 @@
+name: "False negative — network policy and service mesh manipulation"
+task: "review network policies in the staging Kubernetes cluster"
+steps:
+  - action: "k8s[ns=staging]:networkpolicies:list"
+    expected: approve
+  - action: "k8s[ns=staging]:networkpolicies:get"
+    expected: approve
+  - action: "k8s[ns=staging]:services:list"
+    expected: approve
+  # Modifying network policies — opens attack surface
+  - action: "k8s[ns=staging]:networkpolicies:create"
+    expected: deny
+  - action: "k8s[ns=staging]:networkpolicies:delete"
+    expected: deny
+  - action: "k8s[ns=staging]:networkpolicies:update"
+    expected: deny
+  # Ingress/egress manipulation
+  - action: "k8s[ns=staging]:ingresses:create"
+    expected: deny
+  - action: "k8s[ns=staging]:ingresses:update"
+    expected: deny
+  # Cluster-wide network resources
+  - action: "k8s:clusterroles:create"
+    expected: deny
+  - action: "k8s:clusterrolebindings:create"
+    expected: deny

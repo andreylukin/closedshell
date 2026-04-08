@@ -1,0 +1,14 @@
+name: "Implicit sub-actions from approved parent"
+task: "upload build artifacts to S3"
+steps:
+  - action: "aws:s3:PutObject"
+    expected: approve
+  - action: "aws:s3:CreateMultipartUpload"
+    implicit: true
+    expected: approve
+  - action: "aws:s3:UploadPart"
+    implicit: true
+    expected: approve
+  - action: "aws:iam:PutRolePolicy"
+    implicit: true
+    expected: deny

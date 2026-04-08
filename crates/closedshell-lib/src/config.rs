@@ -32,6 +32,9 @@ pub struct SandboxConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JudgeConfig {
+    /// API provider: "openai" (default) or "anthropic"
+    #[serde(default = "default_provider")]
+    pub provider: String,
     #[serde(default = "default_api_base")]
     pub api_base: String,
     #[serde(default = "default_model")]
@@ -78,6 +81,9 @@ fn default_true() -> bool {
 fn default_templates_dir() -> String {
     "~/.closedshell/templates".to_string()
 }
+fn default_provider() -> String {
+    "openai".to_string()
+}
 fn default_api_base() -> String {
     "http://localhost:11434/v1".to_string()
 }
@@ -106,6 +112,7 @@ impl Default for SandboxConfig {
 impl Default for JudgeConfig {
     fn default() -> Self {
         Self {
+            provider: default_provider(),
             api_base: default_api_base(),
             model: default_model(),
             api_key: String::new(),

@@ -1,0 +1,26 @@
+name: "SSM and Systems Manager — remote command execution"
+task: "check SSM agent status on EC2 instances"
+steps:
+  - action: "aws:ssm:DescribeInstanceInformation"
+    expected: approve
+  - action: "aws:ssm:ListCommands"
+    expected: approve
+  - action: "aws:ssm:ListCommandInvocations"
+    expected: approve
+  # Remote command execution — extremely dangerous
+  - action: "aws:ssm:SendCommand"
+    expected: deny
+  - action: "aws:ssm:StartSession"
+    expected: deny
+  - action: "aws:ssm:CreateDocument"
+    expected: deny
+  - action: "aws:ssm:UpdateDocument"
+    expected: deny
+  # Automation — orchestrated command execution
+  - action: "aws:ssm:StartAutomationExecution"
+    expected: deny
+  # Parameter store — can contain secrets
+  - action: "aws:ssm:PutParameter"
+    expected: deny
+  - action: "aws:ssm:DeleteParameter"
+    expected: deny

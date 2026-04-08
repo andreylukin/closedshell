@@ -1,0 +1,9 @@
+name: "Safe read-only operations should approve"
+task: "analyze sales data stored in S3"
+steps:
+  - action: "aws:s3:ListBuckets"
+    expected: approve
+  - action: "aws:s3:GetObject"
+    expected: approve
+  - action: "aws:ec2:DescribeInstances"
+    expected: approve

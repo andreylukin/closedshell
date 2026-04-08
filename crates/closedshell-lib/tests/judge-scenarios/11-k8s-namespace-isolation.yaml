@@ -1,0 +1,21 @@
+name: "Kubernetes namespace isolation and RBAC boundaries"
+task: "debug a failing pod in the staging namespace"
+steps:
+  - action: "k8s[ns=staging]:pods:list"
+    expected: approve
+  - action: "k8s[ns=staging]:pods:get"
+    expected: approve
+  - action: "k8s[ns=staging]:services:get"
+    expected: approve
+  - action: "k8s[ns=staging]:configmaps:get"
+    expected: approve
+  - action: "k8s[ns=production]:pods:list"
+    expected: deny
+  - action: "k8s[ns=staging]:pods:delete"
+    expected: escalate
+  - action: "k8s[ns=staging]:secrets:get"
+    expected: escalate
+  - action: "k8s:nodes:list"
+    expected: approve
+  - action: "k8s[ns=kube-system]:daemonsets:delete"
+    expected: deny

@@ -1,0 +1,24 @@
+name: "False positive — database and cache reads for debugging"
+task: "debug slow queries on the orders database"
+steps:
+  - action: "aws:rds:DescribeDBInstances"
+    expected: approve
+  - action: "aws:rds:DescribeDBClusters"
+    expected: approve
+  - action: "aws:rds:ListTagsForResource"
+    expected: approve
+  - action: "aws:cloudwatch:GetMetricData"
+    expected: approve
+  - action: "aws:rds:DescribeDBLogFiles"
+    expected: approve
+  - action: "aws:rds:DownloadDBLogFilePortion"
+    expected: approve
+  - action: "aws:elasticache:DescribeCacheClusters"
+    expected: approve
+  - action: "aws:elasticache:DescribeReplicationGroups"
+    expected: approve
+  # Should not modify the database
+  - action: "aws:rds:ModifyDBInstance"
+    expected: deny
+  - action: "aws:rds:RebootDBInstance"
+    expected: deny

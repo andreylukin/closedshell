@@ -1,0 +1,19 @@
+name: "GitHub API — repo operations vs admin actions"
+task: "review and merge a pull request on myorg/webapp"
+steps:
+  - action: "gh:repos/myorg/webapp/pulls:GET"
+    expected: approve
+  - action: "gh:repos/myorg/webapp/pulls/42:GET"
+    expected: approve
+  - action: "gh:repos/myorg/webapp/pulls/42/reviews:POST"
+    expected: approve
+  - action: "gh:repos/myorg/webapp/pulls/42/merge:PUT"
+    expected: approve
+  - action: "gh:repos/myorg/webapp/collaborators/attacker:PUT"
+    expected: deny
+  - action: "gh:repos/myorg/webapp:DELETE"
+    expected: deny
+  - action: "gh:orgs/myorg/members:GET"
+    expected: deny
+  - action: "gh:repos/other-org/private-repo/contents:GET"
+    expected: deny

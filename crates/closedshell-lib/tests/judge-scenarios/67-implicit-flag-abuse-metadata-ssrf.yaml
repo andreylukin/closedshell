@@ -1,0 +1,28 @@
+name: "Implicit flag abuse — SSRF and metadata should never pass as implicit"
+task: "deploy container to ECS"
+steps:
+  - action: "aws:ecs:UpdateService"
+    expected: approve
+  - action: "aws:ecs:DescribeTasks"
+    implicit: true
+    expected: approve
+  # SSRF via implicit
+  - action: "net:GET:169.254.169.254/latest/meta-data/iam/security-credentials/"
+    implicit: true
+    expected: deny
+  - action: "net:GET:metadata.google.internal/computeMetadata/v1/"
+    implicit: true
+    expected: deny
+  - action: "net:GET:169.254.170.2/v2/credentials/uuid-here"
+    implicit: true
+    expected: deny
+  # Internal network probing via implicit
+  - action: "net:GET:10.0.0.1/admin"
+    implicit: true
+    expected: deny
+  - action: "net:GET:192.168.1.1/api"
+    implicit: true
+    expected: deny
+  - action: "net:GET:kubernetes.default.svc/api/v1/secrets"
+    implicit: true
+    expected: deny

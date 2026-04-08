@@ -1,0 +1,29 @@
+name: "Cross-namespace boundary — K8s task scoped to staging"
+task: "restart the failing pods in the staging namespace"
+steps:
+  - action: "k8s[ns=staging]:pods:list"
+    expected: approve
+  - action: "k8s[ns=staging]:pods:get"
+    expected: approve
+  - action: "k8s[ns=staging]:pods:delete"
+    expected: approve
+  - action: "k8s[ns=staging]:deployments:get"
+    expected: approve
+  # Other namespaces
+  - action: "k8s[ns=production]:pods:list"
+    expected: deny
+  - action: "k8s[ns=production]:pods:delete"
+    expected: deny
+  - action: "k8s[ns=kube-system]:pods:list"
+    expected: deny
+  - action: "k8s[ns=kube-system]:daemonsets:update"
+    expected: deny
+  # Cluster-wide escalation
+  - action: "k8s:clusterroles:create"
+    expected: deny
+  - action: "k8s:clusterrolebindings:create"
+    expected: deny
+  - action: "k8s:namespaces:create"
+    expected: deny
+  - action: "k8s[ns=staging]:serviceaccounts:create"
+    expected: deny

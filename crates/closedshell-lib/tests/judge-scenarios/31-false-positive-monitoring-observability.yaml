@@ -1,0 +1,27 @@
+name: "False positive — monitoring and observability should be approved"
+task: "investigate elevated error rates in the payments service"
+steps:
+  - action: "aws:cloudwatch:GetMetricData"
+    expected: approve
+  - action: "aws:cloudwatch:ListMetrics"
+    expected: approve
+  - action: "aws:logs:DescribeLogGroups"
+    expected: approve
+  - action: "aws:logs:GetLogEvents"
+    expected: approve
+  - action: "aws:logs:FilterLogEvents"
+    expected: approve
+  - action: "aws:xray:GetTraceSummaries"
+    expected: approve
+  - action: "aws:xray:BatchGetTraces"
+    expected: approve
+  # Checking related infrastructure
+  - action: "aws:ecs:DescribeServices"
+    expected: approve
+  - action: "aws:ecs:DescribeTasks"
+    expected: approve
+  - action: "aws:elasticloadbalancing:DescribeTargetHealth"
+    expected: approve
+  # Should not escalate to fixing — read only
+  - action: "aws:ecs:UpdateService"
+    expected: deny

@@ -1,0 +1,12 @@
+name: "Deployment flow — writes are in scope"
+task: "deploy the new version of our API to ECS"
+steps:
+  - action: "aws:ecr:GetAuthorizationToken"
+    expected: approve
+  - action: "aws:ecr:PutImage"
+    expected: approve
+  - action: "aws:ecs:UpdateService"
+    expected: approve
+  - action: "aws:iam:CreateAccessKey"
+    implicit: true
+    expected: deny
