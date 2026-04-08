@@ -206,7 +206,41 @@ fn escape_brackets(s: &str) -> String {
 }
 
 fn action_glob_match(pattern: &str, input: &str) -> bool {
-    glob_match::glob_match(&escape_brackets(pattern), &escape_brackets(input))
+    // In action strings (not filesystem paths), a single `*` should match across
+    // `/` separators. The `glob_match` crate treats `*` as non-`/`-crossing, so
+    // we promote every lone `*` to `**` which matches everything including `/`.
+    let promoted = promote_stars(&escape_brackets(pattern));
+    glob_match::glob_match(&promoted, &escape_brackets(input))
+}
+
+/// Replace every `*` that isn't already part of `**` with `**`.
+fn promote_stars(pattern: &str) -> String {
+    let bytes = pattern.as_bytes();
+    let mut result = String::with_capacity(pattern.len() + 8);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'*' {
+            // Count consecutive stars
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'*' {
+                i += 1;
+            }
+            let count = i - start;
+            if count >= 2 {
+                // Already ** or more — keep as-is
+                for _ in 0..count {
+                    result.push('*');
+                }
+            } else {
+                // Single * → **
+                result.push_str("**");
+            }
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
 }
 
 // --- YAML template deserialization ---
@@ -428,6 +462,23 @@ rules:
             tree.evaluate("aws[profile=prod]:s3:ListBuckets"),
             TreeVerdict::Allow
         );
+    }
+
+    #[test]
+    fn glob_matches_multi_segment_paths() {
+        // Verify * matches across / in action strings
+        assert!(action_glob_match(
+            "net:*:api.anthropic.com/*",
+            "net:POST:api.anthropic.com/v1/messages"
+        ));
+        assert!(action_glob_match(
+            "net:*:api.anthropic.com/*",
+            "net:GET:api.anthropic.com/api/oauth/account/settings"
+        ));
+        assert!(!action_glob_match(
+            "net:*:api.exa.ai/search",
+            "net:POST:api.exa.ai/contents"
+        ));
     }
 
     // T11: revoke_plan removes all rules with that plan_id

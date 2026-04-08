@@ -1,0 +1,18 @@
+name: anthropic-full
+description: "Allow all Anthropic API, MCP proxy, and Claude Code infra endpoints"
+rules:
+  - effect: permit
+    action: "net:*:api.anthropic.com/*"
+    type: idempotent
+
+  - effect: permit
+    action: "net:*:mcp-proxy.anthropic.com/*"
+    type: idempotent
+
+  - effect: permit
+    action: "net:*:downloads.claude.ai/*"
+    type: idempotent
+
+  - effect: permit
+    action: "net:*:storage.googleapis.com/claude-code-*"
+    type: idempotent

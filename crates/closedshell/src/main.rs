@@ -185,9 +185,12 @@ async fn main() -> anyhow::Result<()> {
         let tree = PermissionTree::new();
         let templates_dir = config::resolve_tilde(&config.sandbox.templates_dir);
         for name in &cli.template {
-            // Try name as-is (absolute path), then as file in templates_dir
-            let path = if std::path::Path::new(name).exists() {
+            // Resolution order: exact path, path + .yaml, templates_dir/name.yaml
+            let raw = std::path::Path::new(name);
+            let path = if raw.exists() {
                 PathBuf::from(name)
+            } else if raw.with_extension("yaml").exists() {
+                raw.with_extension("yaml")
             } else {
                 let mut p = PathBuf::from(&templates_dir);
                 p.push(format!("{}.yaml", name));
