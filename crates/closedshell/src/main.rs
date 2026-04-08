@@ -200,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
     let ipc_socket_path = format!("{}/ask.sock", tmpdir.display());
     let profile = sandbox::generate_seatbelt_profile(
         actual_port,
+        &home.to_string_lossy(),
         &ipc_socket_path,
         &ca_key_path.to_string_lossy(),
     );

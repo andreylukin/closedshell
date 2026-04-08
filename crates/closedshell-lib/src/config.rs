@@ -44,6 +44,16 @@ pub struct JudgeConfig {
     pub temperature: f32,
     #[serde(default)]
     pub system_prompt_path: Option<String>,
+    /// Require TLS for the judge API endpoint.
+    /// Default: true for non-localhost endpoints, false for localhost.
+    /// When true, the judge client will refuse to connect over plain HTTP to
+    /// remote endpoints, preventing MITM of judge responses.
+    #[serde(default)]
+    pub require_tls: Option<bool>,
+    /// Optional path to a CA certificate (PEM) used to verify the judge API.
+    /// Enables certificate pinning for the judge connection.
+    #[serde(default)]
+    pub tls_ca_cert: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -102,7 +112,25 @@ impl Default for JudgeConfig {
             timeout_ms: default_timeout(),
             temperature: 0.0,
             system_prompt_path: None,
+            require_tls: None,
+            tls_ca_cert: None,
         }
+    }
+}
+
+impl JudgeConfig {
+    /// Whether TLS is required for the judge endpoint.
+    /// Explicit config takes precedence; otherwise require TLS for non-localhost endpoints.
+    pub fn tls_required(&self) -> bool {
+        if let Some(explicit) = self.require_tls {
+            return explicit;
+        }
+        // Auto-detect: localhost endpoints don't need TLS
+        let url = self.api_base.to_lowercase();
+        let is_localhost = url.contains("://localhost")
+            || url.contains("://127.0.0.1")
+            || url.contains("://[::1]");
+        !is_localhost
     }
 }
 
@@ -288,5 +316,62 @@ approval:
         assert!(config.sandbox.yolo);
         assert_eq!(config.sandbox.passthrough_env.len(), 4);
         assert_eq!(config.judge.timeout_ms, 3000);
+    }
+
+    #[test]
+    fn test_tls_required_auto_detect() {
+        // Localhost: TLS not required
+        let config = JudgeConfig {
+            api_base: "http://localhost:11434/v1".into(),
+            ..Default::default()
+        };
+        assert!(!config.tls_required());
+
+        // 127.0.0.1: TLS not required
+        let config = JudgeConfig {
+            api_base: "http://127.0.0.1:11434/v1".into(),
+            ..Default::default()
+        };
+        assert!(!config.tls_required());
+
+        // Remote: TLS required
+        let config = JudgeConfig {
+            api_base: "http://judge.example.com/v1".into(),
+            ..Default::default()
+        };
+        assert!(config.tls_required());
+    }
+
+    #[test]
+    fn test_tls_required_explicit_override() {
+        let config = JudgeConfig {
+            api_base: "http://localhost:11434/v1".into(),
+            require_tls: Some(true),
+            ..Default::default()
+        };
+        assert!(config.tls_required());
+
+        let config = JudgeConfig {
+            api_base: "http://judge.example.com/v1".into(),
+            require_tls: Some(false),
+            ..Default::default()
+        };
+        assert!(!config.tls_required());
+    }
+
+    #[test]
+    fn test_parse_judge_tls_config_yaml() {
+        let yaml = r#"
+judge:
+  api_base: "https://judge.example.com/v1"
+  require_tls: true
+  tls_ca_cert: "/etc/ssl/judge-ca.pem"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.judge.require_tls, Some(true));
+        assert_eq!(
+            config.judge.tls_ca_cert.as_deref(),
+            Some("/etc/ssl/judge-ca.pem")
+        );
     }
 }

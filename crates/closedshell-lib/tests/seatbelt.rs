@@ -37,6 +37,7 @@ fn sandbox_run(profile: &str, cmd: &[&str]) -> (i32, String, String) {
 fn seatbelt_allows_local_commands() {
     let profile = generate_seatbelt_profile(
         8443,
+        "/Users/test",
         "/tmp/closedshell-test/ask.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
@@ -49,6 +50,7 @@ fn seatbelt_allows_local_commands() {
 fn seatbelt_blocks_outbound_network() {
     let profile = generate_seatbelt_profile(
         8443,
+        "/Users/test",
         "/tmp/closedshell-test/ask.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
@@ -83,6 +85,7 @@ fn seatbelt_allows_localhost_proxy_port() {
 
     let profile = generate_seatbelt_profile(
         port,
+        "/Users/test",
         "/tmp/closedshell-test/ask.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
@@ -111,6 +114,7 @@ fn seatbelt_blocks_non_proxy_localhost_port() {
 
     let profile = generate_seatbelt_profile(
         wrong_port,
+        "/Users/test",
         "/tmp/closedshell-test/ask.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
@@ -132,6 +136,7 @@ fn seatbelt_blocks_non_proxy_localhost_port() {
 fn seatbelt_allows_file_operations() {
     let profile = generate_seatbelt_profile(
         8443,
+        "/Users/test",
         "/tmp/closedshell-test/ask.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );

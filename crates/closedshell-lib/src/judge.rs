@@ -145,7 +145,20 @@ struct ChoiceMessage {
 
 impl JudgeClient {
     /// Create a new judge client. Loads system prompt from file if configured.
+    ///
+    /// Validates TLS requirements:
+    /// - Non-localhost endpoints must use HTTPS (unless `require_tls: false` in config)
+    /// - Optional certificate pinning via `tls_ca_cert` config
     pub fn new(config: JudgeConfig) -> anyhow::Result<Self> {
+        // Enforce TLS for non-localhost endpoints
+        if config.tls_required() && config.api_base.starts_with("http://") {
+            anyhow::bail!(
+                "judge API endpoint '{}' uses plain HTTP but TLS is required for non-localhost endpoints. \
+                 Use an https:// URL, or set judge.require_tls: false in config to override (not recommended).",
+                config.api_base
+            );
+        }
+
         let system_prompt = match &config.system_prompt_path {
             Some(path) => std::fs::read_to_string(path).map_err(|e| {
                 anyhow::anyhow!("failed to read system prompt from {}: {}", path, e)
@@ -153,9 +166,22 @@ impl JudgeClient {
             None => DEFAULT_SYSTEM_PROMPT.to_string(),
         };
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.timeout_ms))
-            .build()?;
+        let mut http_builder =
+            reqwest::Client::builder().timeout(Duration::from_millis(config.timeout_ms));
+
+        // Certificate pinning: if a CA cert is configured, use only that for TLS verification
+        if let Some(ref ca_path) = config.tls_ca_cert {
+            let ca_pem = std::fs::read(ca_path).map_err(|e| {
+                anyhow::anyhow!("failed to read judge TLS CA cert from {}: {}", ca_path, e)
+            })?;
+            let cert = reqwest::Certificate::from_pem(&ca_pem)?;
+            http_builder = http_builder
+                .add_root_certificate(cert)
+                .tls_built_in_root_certs(false);
+            debug!("judge client: TLS pinned to CA from {}", ca_path);
+        }
+
+        let http = http_builder.build()?;
 
         Ok(Self {
             http,
@@ -580,6 +606,66 @@ mod tests {
 
         let decision = client.evaluate_action(req).await;
         assert!(matches!(decision, JudgeDecision::Deny { .. }));
+    }
+
+    #[test]
+    fn test_tls_required_for_remote_http() {
+        let config = JudgeConfig {
+            api_base: "http://judge.example.com/v1".into(),
+            ..Default::default()
+        };
+        let err = JudgeClient::new(config).err().expect("should fail");
+        assert!(err.to_string().contains("TLS is required"));
+    }
+
+    #[test]
+    fn test_tls_not_required_for_localhost() {
+        let config = JudgeConfig {
+            api_base: "http://localhost:11434/v1".into(),
+            ..Default::default()
+        };
+        assert!(JudgeClient::new(config).is_ok());
+    }
+
+    #[test]
+    fn test_tls_not_required_for_127() {
+        let config = JudgeConfig {
+            api_base: "http://127.0.0.1:11434/v1".into(),
+            ..Default::default()
+        };
+        assert!(JudgeClient::new(config).is_ok());
+    }
+
+    #[test]
+    fn test_tls_override_allows_remote_http() {
+        let config = JudgeConfig {
+            api_base: "http://judge.example.com/v1".into(),
+            require_tls: Some(false),
+            ..Default::default()
+        };
+        assert!(JudgeClient::new(config).is_ok());
+    }
+
+    #[test]
+    fn test_tls_override_requires_localhost_https() {
+        let config = JudgeConfig {
+            api_base: "http://localhost:11434/v1".into(),
+            require_tls: Some(true),
+            ..Default::default()
+        };
+        let err = JudgeClient::new(config).err().expect("should fail");
+        assert!(err.to_string().contains("TLS is required"));
+    }
+
+    #[test]
+    fn test_tls_ca_cert_nonexistent_file() {
+        let config = JudgeConfig {
+            api_base: "https://judge.example.com/v1".into(),
+            tls_ca_cert: Some("/nonexistent/ca.pem".into()),
+            ..Default::default()
+        };
+        let err = JudgeClient::new(config).err().expect("should fail");
+        assert!(err.to_string().contains("failed to read judge TLS CA cert"));
     }
 
     fn make_test_client() -> JudgeClient {
