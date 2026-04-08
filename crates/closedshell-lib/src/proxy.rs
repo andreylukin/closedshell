@@ -1,10 +1,11 @@
 //! MITM proxy: intercepts HTTPS, parses actions, logs decisions.
 //!
-//! In YOLO mode: parse action, log as "allow (yolo)", forward to upstream.
-//! No permission tree consulted, no judge.
+//! The proxy uses a [`DecisionMaker`] to decide whether each intercepted
+//! request should be forwarded or blocked. In YOLO mode, [`YoloDecider`]
+//! allows everything.
 
 use crate::audit::{AuditLog, AuditPayload, RequestMeta};
-use crate::parser::{self, RequestInfo};
+use crate::parser::{self, Action, RequestInfo};
 use crate::tls::SessionCA;
 
 use std::collections::HashMap;
@@ -17,11 +18,51 @@ use tokio::net::{TcpListener, TcpStream};
 
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 
+/// The result of evaluating an action against a policy.
+pub enum Verdict {
+    Allow,
+    Deny { reason: String },
+}
+
+/// Decides whether an intercepted action should be forwarded or blocked.
+pub trait DecisionMaker: Send + Sync + 'static {
+    fn evaluate(&self, action: &Action) -> Verdict;
+}
+
+/// YOLO mode: always allow.
+pub struct YoloDecider;
+
+impl DecisionMaker for YoloDecider {
+    fn evaluate(&self, _action: &Action) -> Verdict {
+        Verdict::Allow
+    }
+}
+
+/// Allow actions matching any of the given glob patterns. Default deny.
+pub struct PatternDecider {
+    pub allow_patterns: Vec<String>,
+}
+
+impl DecisionMaker for PatternDecider {
+    fn evaluate(&self, action: &Action) -> Verdict {
+        let canonical = action.canonical();
+        for pattern in &self.allow_patterns {
+            if glob_match::glob_match(pattern, &canonical) {
+                return Verdict::Allow;
+            }
+        }
+        Verdict::Deny {
+            reason: format!("no allow rule matched: {}", canonical),
+        }
+    }
+}
+
 /// MITM proxy configuration.
 pub struct MitmProxy {
     pub ca: Arc<SessionCA>,
     pub audit: Arc<AuditLog>,
     pub port: u16,
+    pub decider: Arc<dyn DecisionMaker>,
 }
 
 /// Shared counter for proxy decisions.
@@ -44,6 +85,7 @@ impl MitmProxy {
         let actual_port = listener.local_addr()?.port();
         let ca = self.ca;
         let audit = self.audit;
+        let decider = self.decider;
         let stats = ProxyStats::default();
 
         let handle = {
@@ -54,9 +96,12 @@ impl MitmProxy {
                         Ok((stream, _addr)) => {
                             let ca = ca.clone();
                             let audit = audit.clone();
+                            let decider = decider.clone();
                             let stats = stats.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_client(stream, ca, audit, &stats).await {
+                                if let Err(e) =
+                                    handle_client(stream, ca, audit, decider, &stats).await
+                                {
                                     tracing::debug!("client connection error: {}", e);
                                 }
                             });
@@ -78,6 +123,7 @@ async fn handle_client(
     mut stream: TcpStream,
     ca: Arc<SessionCA>,
     audit: Arc<AuditLog>,
+    decider: Arc<dyn DecisionMaker>,
     stats: &ProxyStats,
 ) -> anyhow::Result<()> {
     let mut buf_reader = BufReader::new(&mut stream);
@@ -119,9 +165,13 @@ async fn handle_client(
     // Now do TLS handshake with the client using our session CA leaf cert
     let leaf = ca.generate_leaf_cert(&hostname)?;
 
-    let cert_chain = vec![rustls_pemfile::certs(&mut Cursor::new(leaf.cert_pem.as_bytes()))
+    let leaf_cert = rustls_pemfile::certs(&mut Cursor::new(leaf.cert_pem.as_bytes()))
         .next()
-        .ok_or_else(|| anyhow::anyhow!("no cert in PEM"))??];
+        .ok_or_else(|| anyhow::anyhow!("no cert in PEM"))??;
+    let ca_cert = rustls_pemfile::certs(&mut Cursor::new(ca.ca_pem().as_bytes()))
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no CA cert in PEM"))??;
+    let cert_chain = vec![leaf_cert, ca_cert];
     let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf.key_der.clone()));
 
     let mut tls_config = rustls::ServerConfig::builder()
@@ -194,13 +244,20 @@ async fn handle_client(
         };
         let action = parser::parse_action(&req_info);
 
-        // Log decision (YOLO mode: always allow)
+        // Evaluate decision
+        let verdict = decider.evaluate(&action);
         stats.total_decisions.fetch_add(1, Ordering::Relaxed);
+
+        let (result_str, reason) = match &verdict {
+            Verdict::Allow => ("allow".to_string(), None),
+            Verdict::Deny { reason } => (format!("deny: {}", reason), Some(reason.clone())),
+        };
+
         let _ = audit.log(AuditPayload::Decision {
             action: action.canonical(),
-            result: "allow (yolo)".into(),
-            decided_by: "yolo".into(),
-            reason: None,
+            result: result_str,
+            decided_by: "decider".into(),
+            reason,
             latency_ms: 0,
             request: RequestMeta {
                 method: method.clone(),
@@ -208,6 +265,20 @@ async fn handle_client(
                 path: clean_path,
             },
         });
+
+        // On deny: return 403 and continue keepalive loop
+        if let Verdict::Deny { reason } = &verdict {
+            let body = format!("closedshell: denied — {}\n", reason);
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            drop(header_buf);
+            client_tls.write_all(response.as_bytes()).await?;
+            client_tls.flush().await?;
+            continue;
+        }
 
         // Connect to upstream
         let upstream_addr = format!("{}:443", hostname);
@@ -382,6 +453,7 @@ mod tests {
             ca,
             audit,
             port: 0, // OS-assigned port
+            decider: Arc::new(YoloDecider),
         };
 
         let (port, handle, _stats) = proxy.start().await.unwrap();
@@ -404,6 +476,7 @@ mod tests {
             ca,
             audit,
             port: 0,
+            decider: Arc::new(YoloDecider),
         };
 
         let (port, handle, _stats) = proxy.start().await.unwrap();
@@ -432,6 +505,7 @@ mod tests {
             ca,
             audit,
             port: 0,
+            decider: Arc::new(YoloDecider),
         };
 
         let (port, handle, _stats) = proxy.start().await.unwrap();

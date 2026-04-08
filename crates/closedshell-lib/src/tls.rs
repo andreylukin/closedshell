@@ -9,6 +9,7 @@ use rcgen::{
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
+use time::OffsetDateTime;
 
 /// A session-scoped certificate authority.
 pub struct SessionCA {
@@ -84,8 +85,9 @@ impl SessionCA {
             KeyUsagePurpose::KeyEncipherment,
         ];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-        params.not_before = rcgen::date_time_ymd(2024, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2030, 1, 1);
+        let now = OffsetDateTime::now_utc();
+        params.not_before = now - time::Duration::minutes(5);
+        params.not_after = now + time::Duration::days(1);
 
         let leaf_cert = params.signed_by(&leaf_key, &self.ca_cert, &self.ca_key)?;
 

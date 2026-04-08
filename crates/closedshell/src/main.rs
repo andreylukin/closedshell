@@ -1,7 +1,7 @@
 use clap::Parser;
 use closedshell_lib::audit::{AuditLog, AuditPayload};
 use closedshell_lib::config::{self, CliFlags};
-use closedshell_lib::proxy::MitmProxy;
+use closedshell_lib::proxy::{MitmProxy, YoloDecider};
 use closedshell_lib::sandbox;
 use closedshell_lib::tls::SessionCA;
 use std::path::PathBuf;
@@ -29,6 +29,10 @@ struct Cli {
     /// Ignore existing session, start clean
     #[arg(long)]
     fresh: bool,
+
+    /// Allow actions matching this glob pattern (repeatable, default deny when set)
+    #[arg(long)]
+    allow: Vec<String>,
 
     /// Command to run in sandbox (e.g., "pi", "claude-code")
     #[arg(trailing_var_arg = true, required = true)]
@@ -76,17 +80,27 @@ async fn main() -> anyhow::Result<()> {
     let tmpdir = PathBuf::from(format!("/tmp/closedshell-{}", session_id));
     std::fs::create_dir_all(&tmpdir)?;
 
-    // 4. Generate session CA, write CA PEM to tmpdir
+    // 4. Generate session CA, write combined trust store (session CA + system roots) to tmpdir
     let ca = Arc::new(SessionCA::new()?);
     let ca_pem_path = tmpdir.join("ca.pem");
-    std::fs::write(&ca_pem_path, ca.ca_pem())?;
+    let mut trust_store = String::from(ca.ca_pem());
+    // Append system roots so clients that replace their root store with SSL_CERT_FILE
+    // (e.g., Go on macOS) can still verify upstream certs if needed.
+    if let Ok(system_pem) = std::fs::read_to_string("/etc/ssl/cert.pem") {
+        trust_store.push('\n');
+        trust_store.push_str(&system_pem);
+    }
+    std::fs::write(&ca_pem_path, &trust_store)?;
 
     // 5. Start MITM proxy
     let audit = Arc::new(AuditLog::open(&std::env::current_dir()?, &session_id)?);
+    let decider: Arc<dyn closedshell_lib::proxy::DecisionMaker> = Arc::new(YoloDecider);
+
     let proxy = MitmProxy {
         ca: ca.clone(),
         audit: audit.clone(),
         port: 8443,
+        decider: decider.clone(),
     };
 
     let (actual_port, proxy_handle, proxy_stats) = match proxy.start().await {
@@ -97,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
                 ca: ca.clone(),
                 audit: audit.clone(),
                 port: 0,
+                decider: decider.clone(),
             };
             proxy.start().await?
         }
@@ -106,6 +121,17 @@ async fn main() -> anyhow::Result<()> {
     let profile = sandbox::generate_seatbelt_profile(actual_port);
     let profile_path = tmpdir.join("profile.sb");
     std::fs::write(&profile_path, &profile)?;
+
+    // 6b. Add session CA to macOS login keychain (removed on cleanup)
+    let security_status = std::process::Command::new("security")
+        .args(["add-trusted-cert", "-r", "trustRoot", "-k"])
+        .arg(PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Keychains/login.keychain-db"))
+        .arg(&ca_pem_path)
+        .status();
+    let ca_in_keychain = matches!(security_status, Ok(s) if s.success());
+    if !ca_in_keychain {
+        tracing::warn!("could not add session CA to login keychain — Go/macOS TLS may fail");
+    }
 
     // 7. Print MOTD
     if config.sandbox.motd {
@@ -140,6 +166,8 @@ async fn main() -> anyhow::Result<()> {
         .arg(format!("HTTPS_PROXY={}", proxy_url))
         .arg(format!("HTTP_PROXY={}", proxy_url))
         .arg(format!("SSL_CERT_FILE={}", ca_pem_path.display()))
+        .arg(format!("SSL_CERT_DIR={}", tmpdir.display()))
+        .arg("GODEBUG=x509usefallbackroots=1")
         .arg(format!(
             "CLOSEDSHELL_SOCKET={}/ask.sock",
             tmpdir.display()
@@ -178,6 +206,14 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     proxy_handle.abort();
+
+    // Remove session CA from login keychain
+    if ca_in_keychain {
+        let _ = std::process::Command::new("security")
+            .args(["remove-trusted-cert"])
+            .arg(&ca_pem_path)
+            .status();
+    }
 
     // Remove tmpdir
     let _ = std::fs::remove_dir_all(&tmpdir);

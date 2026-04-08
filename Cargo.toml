@@ -30,3 +30,4 @@ rustls-pemfile = "2"
 webpki-roots = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
+time = "0.3"
