@@ -96,7 +96,9 @@ The MITM proxy needs sandboxed processes to trust its dynamically generated leaf
 **Two trust paths cover all clients:**
 
 1. **`SSL_CERT_FILE`** — set inside the sandbox to a bundle containing the ClosedShell CA + system roots. This covers most CLI tools: curl, Python, Node, Ruby, and Go with `GODEBUG=x509usefallbackroots=1`.
-2. **macOS user trust store** — the CA is registered via `security add-trusted-cert` on first run. This covers Go binaries that use Security.framework (cgo) and any other tool that ignores `SSL_CERT_FILE` and goes straight to the system trust store.
+2. **macOS user trust store** — the CA is registered on first run via Security.framework. This covers Go binaries that use cgo and any other tool that ignores `SSL_CERT_FILE` and goes straight to the system trust store.
+
+**Why not `security add-trusted-cert`:** On modern macOS (Big Sur 11.3+), `security add-trusted-cert` always prompts for a password — even when writing to the user domain. There is no flag to suppress it. Instead, ClosedShell compiles a small Swift helper on first run that calls `SecTrustSettingsSetTrustSettings` directly with the `.user` domain, which does not require authentication. The compiled helper is cached at `~/.closedshell/trust-cert` and reused if the CA is ever regenerated.
 
 **Leaf certs are still per-hostname, per-session.** The persistent CA only means the *root of trust* doesn't change — individual leaf certs are generated on-the-fly when the proxy sees a new SNI hostname, cached in memory for the session, and discarded on exit.
 
