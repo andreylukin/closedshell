@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod config;
 pub mod ipc;
+pub mod judge;
 pub mod parser;
 pub mod permission;
 pub mod proxy;
