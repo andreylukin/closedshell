@@ -1,0 +1,6 @@
+name: exa-full
+description: "Allow all Exa API endpoints"
+rules:
+  - effect: permit
+    action: "net:*:api.exa.ai/*"
+    type: idempotent
