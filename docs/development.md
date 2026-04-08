@@ -14,7 +14,7 @@ Everything that makes the sandbox work end-to-end. This is one integrated delive
 - `ask` CLI skeleton (read-only commands first: status, why-denied)
 - Transparent MITM proxy with session-scoped CA
 - Provider parsers (generic `net:METHOD:host/path` first, then AWS/GCP/etc.) — see [proxy.md](proxy.md)
-- Credential mounts (file, env, socket, oauth with daemon-side refresh) — see [proxy.md](proxy.md)
+- Environment variable passthrough for credentials — see [proxy.md](proxy.md)
 - Tree lookup on every request — unknown = deny (no judge yet)
 - `closedshell <cmd>` lifecycle + session persistence (SQLite)
 

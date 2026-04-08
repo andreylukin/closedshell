@@ -38,8 +38,8 @@ This means ClosedShell is lightweight enough to actually use. No VM boot times, 
 │  Permission   Judge      HTTPS              │
 │  Tree         (LLM)      Proxy              │
 │                                             │
-│  Credential   Human                         │
-│  Vault        Approval                      │
+│  Env          Human                         │
+│  Passthrough  Approval                      │
 └─────────────────────────────────────────────┘
 ```
 
@@ -82,7 +82,7 @@ Most agents don't need `ask` for network — the proxy handles it automatically 
 
 ### Sandbox
 
-Platform-specific isolation (Linux: namespaces + seccomp-bpf, macOS: Seatbelt), unified by the MITM proxy as the enforcement boundary. Credentials mounted in but can't bypass the proxy.
+Platform-specific isolation (Linux: namespaces + seccomp-bpf, macOS: Seatbelt), unified by the MITM proxy as the enforcement boundary. Environment variables are passed through to the sandbox; the proxy enforces what the agent can actually do with them.
 
 ---
 
@@ -116,7 +116,7 @@ Ships as two static binaries: `closedshell` (host) and `ask` (sandbox).
 | [docs/architecture.md](docs/architecture.md) | Platform sandbox design (macOS Seatbelt + proxy, Linux namespaces), security boundaries |
 | [docs/permission-tree.md](docs/permission-tree.md) | Cedar-inspired permission model, evaluation algorithm, action format, [templates](docs/permission-tree.md#templates), flows, denial UX |
 | [docs/judge.md](docs/judge.md) | Judge config, structured I/O, decision matrix |
-| [docs/proxy.md](docs/proxy.md) | HTTPS proxy, provider parsers, credential qualifier format, credential mounts |
+| [docs/proxy.md](docs/proxy.md) | HTTPS proxy, provider parsers, credential qualifier format |
 | [docs/development.md](docs/development.md) | Build sections, dependency graph, recommended build order |
 
 ---
@@ -133,28 +133,12 @@ sandbox:
   implicit_ask: true        # proxy auto-consults judge for unknown actions
   yolo: false               # log-only mode — no blocking
 
-  # Process exec allowlist (added to seatbelt profile)
-  exec_allowlist:
-    - /bin/sh
-    - /bin/bash
-    - /usr/bin/env
-    - /usr/local/bin/aws
-    # agent-specific binaries added automatically
-
-  credentials:
-    - type: file
-      source: ~/.aws/credentials
-      mount: ~/.aws/credentials
-      readonly: true
-    - type: env
-      vars: [OPENAI_API_KEY, GITHUB_TOKEN]
-    - type: socket
-      source: $SSH_AUTH_SOCK
-      mount: /tmp/ssh-agent.sock
-    - type: oauth
-      provider: gcp
-      token_path: ~/.config/gcloud/
-      refresh_interval: 45m
+  # Environment variables to pass through to the sandboxed process
+  passthrough_env:
+    - OPENAI_API_KEY
+    - GITHUB_TOKEN
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
 
   templates_dir: ~/.closedshell/templates   # where to find .yaml template files
 

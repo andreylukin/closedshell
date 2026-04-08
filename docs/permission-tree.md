@@ -118,7 +118,7 @@ evaluate(action) -> ALLOW | DENY(reason)
 
 ## Action Format
 
-Actions use a structured string format with credential qualifiers:
+Actions use a structured string format with provider qualifiers:
 
 ```
 provider[qualifier]:service:operation
@@ -181,7 +181,7 @@ ClosedShell's threat model focuses on remote damage (cloud API abuse), not local
 
 | Operation | Enforcement | Mechanism |
 |---|---|---|
-| **Writes outside tmpdir** | **Enforced** | Seatbelt denies `file-write*` except tmpdir. Only way to write elsewhere is `ask write` → daemon writes on host side after permission check. |
+| **Writes outside tmpdir** | **Audited** | `ask write` is the audited, permission-checked path. Direct writes are not blocked — the proxy is the enforcement boundary, not the filesystem. |
 | **Reads** | **Audited** | Agent can `cat` files directly (Seatbelt allows `file-read*`). `ask read` is the audited path — goes through permission tree, logged, judge can reason about it. |
 | **Writes inside tmpdir** | **Unrestricted** | Agent's scratch space. No permission needed. |
 
@@ -201,7 +201,7 @@ Agent can also `cat` the file directly — Seatbelt allows reads. But `ask read`
 3. If permitted: daemon writes file on host side, confirms to agent
 4. Logged with full path, size, and timestamp
 
-This is the **only** way to write outside the sandbox tmpdir. Seatbelt enforces this — `deny file-write*` with tmpdir exception means the agent literally cannot write elsewhere on its own.
+`ask write` is the audited, permission-checked path for file writes. Direct writes are not blocked — the proxy is the enforcement boundary, not the filesystem. Agents that use `ask write` get audit logging and permission checks; agents that write directly bypass these but can't bypass the network proxy.
 
 ### Example rules
 
@@ -228,7 +228,7 @@ This is the **only** way to write outside the sandbox tmpdir. Seatbelt enforces 
 
 ### Why not enforce reads too?
 
-Enforcing reads (Seatbelt `deny file-read*`) would break every CLI tool — `aws`, `git`, `python`, `node` all read config files, shared libraries, and certificates. The tradeoff: reads are observable via `ask read` and blockable via forbid rules, but the agent *can* bypass them with direct file access. This matches the threat model — an agent reading your `.bashrc` is annoying, an agent `aws s3 rm --recursive` is catastrophic.
+Enforcing reads via seatbelt would break every CLI tool — `aws`, `git`, `python`, `node` all read config files, shared libraries, and certificates. The tradeoff: reads are observable via `ask read` and blockable via forbid rules, but the agent *can* bypass them with direct file access. This matches the threat model — an agent reading your `.bashrc` is annoying, an agent `aws s3 rm --recursive` is catastrophic.
 
 ---
 
@@ -510,7 +510,7 @@ The agent sends a free-text description. The judge — not the agent's LLM — d
 ```
 Agent: ask plan "Rollback bad ECS deployment"
   1. ask CLI → daemon: {type: "plan", description: "Rollback bad ECS deployment"}
-  2. Daemon → judge: {plan_description, current_tree, session_context, credentials_available}
+  2. Daemon → judge: {plan_description, current_tree, session_context}
   3. Judge returns: proposed rules (permits with types and risk levels)
   4. Daemon validates rules against schema + existing forbids
   5. Safe actions → auto-approved, added to tree immediately
