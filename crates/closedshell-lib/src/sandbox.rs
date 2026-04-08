@@ -1,5 +1,20 @@
 //! Seatbelt sandbox: .sb profile generation and sandbox-exec wrapper.
 
+/// Escape special regex characters in a path for use in Seatbelt regex rules.
+fn regex_escape(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '.' | '(' | ')' | '[' | ']' | '{' | '}' | '*' | '+' | '?' | '|' | '^' | '$' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Generate a seatbelt (.sb) profile string.
 ///
 /// Strategy: allow everything by default, deny network + sensitive file access.
@@ -20,7 +35,12 @@ pub fn generate_seatbelt_profile(
     sb.push_str("(allow default)\n\n");
 
     // -- File protection: deny writes to shell config and sensitive directories --
+    //
+    // Using regex instead of literal because tools like Claude Code bypass literal
+    // denies via hardlink creation (link temp → .zshrc.new) + rename chains.
+    // The regex catches the canonical path and any suffixed variants (.zshrc.new, etc.)
     sb.push_str(";; Prevent persistence attacks via shell rc injection\n");
+    sb.push_str(";; Uses regex to catch hardlink/rename bypass (temp.new → .zshrc)\n");
     for rc in &[
         ".bashrc",
         ".bash_profile",
@@ -31,9 +51,11 @@ pub fn generate_seatbelt_profile(
         ".zshenv",
         ".zlogin",
     ] {
+        // Deny writes to the file itself AND any suffixed variant (e.g. .zshrc.new, .zshrc.tmp)
         sb.push_str(&format!(
-            "(deny file-write* (literal \"{}/{}\"))\n",
-            home, rc
+            "(deny file-write* (regex \"^{}/{}(\\..+)?$\"))\n",
+            regex_escape(home),
+            regex_escape(rc)
         ));
     }
     sb.push('\n');
@@ -47,8 +69,8 @@ pub fn generate_seatbelt_profile(
     }
     // AWS credentials: deny the secrets, allow config (region/profile names are harmless)
     sb.push_str(&format!(
-        "(deny file-read* file-write* (literal \"{}/{}\" \"{}/{}\"))\n",
-        home, ".aws/credentials", home, ".aws/sso/cache"
+        "(deny file-read* file-write* (regex \"^{}/\\.aws/(credentials|sso/cache)$\"))\n",
+        regex_escape(home)
     ));
     sb.push('\n');
 
@@ -151,13 +173,23 @@ mod tests {
     }
 
     #[test]
-    fn test_profile_denies_shell_rc_writes() {
+    fn test_profile_denies_shell_rc_writes_via_regex() {
         let p = profile(8443);
+        // Regex-based deny catches hardlink/rename bypass patterns
         for rc in &[".bashrc", ".zshrc", ".zprofile", ".profile", ".zshenv"] {
+            let escaped_home = super::regex_escape(HOME);
+            let escaped_rc = super::regex_escape(rc);
+            // The profile contains literal regex: (\..+)? — one backslash in the output
+            let expected = format!(
+                "(deny file-write* (regex \"^{}/{}(\\..+)?$\"))",
+                escaped_home, escaped_rc
+            );
             assert!(
-                p.contains(&format!("(deny file-write* (literal \"{}/{}\")", HOME, rc)),
-                "should deny writes to {}",
-                rc
+                p.contains(&expected),
+                "should deny writes to {}: expected '{}' in profile:\n{}",
+                rc,
+                expected,
+                p
             );
         }
     }
@@ -180,6 +212,16 @@ mod tests {
     #[test]
     fn test_profile_denies_aws_credentials() {
         let p = profile(8443);
-        assert!(p.contains(&format!("\"{}/.aws/credentials\"", HOME)));
+        assert!(p.contains(".aws/(credentials|sso/cache)"));
+    }
+
+    #[test]
+    fn test_regex_escape() {
+        assert_eq!(super::regex_escape("/Users/test"), "/Users/test");
+        assert_eq!(
+            super::regex_escape("/path.with.dots"),
+            "/path\\.with\\.dots"
+        );
+        assert_eq!(super::regex_escape("a(b)c"), "a\\(b\\)c");
     }
 }
