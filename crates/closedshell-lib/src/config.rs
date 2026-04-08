@@ -23,41 +23,11 @@ pub struct SandboxConfig {
     pub implicit_ask: bool,
     #[serde(default)]
     pub yolo: bool,
+    /// Environment variables to pass through to the sandboxed process.
     #[serde(default)]
-    pub exec_allowlist: Vec<String>,
-    #[serde(default)]
-    pub credentials: Vec<CredentialMount>,
+    pub passthrough_env: Vec<String>,
     #[serde(default = "default_templates_dir")]
     pub templates_dir: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredentialMount {
-    #[serde(rename = "type")]
-    pub mount_type: CredentialType,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub mount: Option<String>,
-    #[serde(default)]
-    pub readonly: bool,
-    #[serde(default)]
-    pub vars: Vec<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub token_path: Option<String>,
-    #[serde(default)]
-    pub refresh_interval: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CredentialType {
-    File,
-    Env,
-    Socket,
-    OAuth,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,8 +87,7 @@ impl Default for SandboxConfig {
             motd: true,
             implicit_ask: true,
             yolo: false,
-            exec_allowlist: vec![],
-            credentials: vec![],
+            passthrough_env: vec![],
             templates_dir: default_templates_dir(),
         }
     }
@@ -174,17 +143,6 @@ impl Config {
     /// Resolve all `~` paths in the config.
     pub fn resolve_paths(&mut self) {
         self.sandbox.templates_dir = resolve_tilde(&self.sandbox.templates_dir);
-        for cred in &mut self.sandbox.credentials {
-            if let Some(ref source) = cred.source {
-                cred.source = Some(resolve_tilde(source));
-            }
-            if let Some(ref mount) = cred.mount {
-                cred.mount = Some(resolve_tilde(mount));
-            }
-            if let Some(ref tp) = cred.token_path {
-                cred.token_path = Some(resolve_tilde(tp));
-            }
-        }
         if let Some(ref path) = self.judge.system_prompt_path {
             self.judge.system_prompt_path = Some(resolve_tilde(path));
         }
@@ -288,31 +246,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_paths_credentials() {
-        let yaml = r#"
-sandbox:
-  credentials:
-    - type: file
-      source: ~/.aws/credentials
-      mount: ~/.aws/credentials
-      readonly: true
-"#;
-        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
-        config.resolve_paths();
-
-        let home = std::env::var("HOME").unwrap();
-        let cred = &config.sandbox.credentials[0];
-        assert_eq!(
-            cred.source.as_deref().unwrap(),
-            format!("{}/.aws/credentials", home)
-        );
-        assert_eq!(
-            cred.mount.as_deref().unwrap(),
-            format!("{}/.aws/credentials", home)
-        );
-    }
-
-    #[test]
     fn test_resolve_paths_templates_dir() {
         let mut config = Config::default();
         assert!(config.sandbox.templates_dir.starts_with("~"));
@@ -336,16 +269,11 @@ sandbox:
   motd: false
   implicit_ask: true
   yolo: true
-  exec_allowlist:
-    - /bin/sh
-    - /usr/local/bin/aws
-  credentials:
-    - type: file
-      source: ~/.aws/credentials
-      mount: ~/.aws/credentials
-      readonly: true
-    - type: env
-      vars: [OPENAI_API_KEY, GITHUB_TOKEN]
+  passthrough_env:
+    - OPENAI_API_KEY
+    - GITHUB_TOKEN
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
 
 judge:
   api_base: "http://localhost:11434/v1"
@@ -358,7 +286,7 @@ approval:
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(!config.sandbox.motd);
         assert!(config.sandbox.yolo);
-        assert_eq!(config.sandbox.credentials.len(), 2);
+        assert_eq!(config.sandbox.passthrough_env.len(), 4);
         assert_eq!(config.judge.timeout_ms, 3000);
     }
 }
