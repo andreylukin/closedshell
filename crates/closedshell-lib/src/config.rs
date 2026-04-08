@@ -117,11 +117,7 @@ impl Default for SandboxConfig {
             motd: true,
             implicit_ask: true,
             yolo: false,
-            exec_allowlist: vec![
-                "/bin/sh".into(),
-                "/bin/bash".into(),
-                "/usr/bin/env".into(),
-            ],
+            exec_allowlist: vec![],
             credentials: vec![],
             templates_dir: default_templates_dir(),
         }

@@ -74,10 +74,15 @@ impl SessionCA {
         let leaf_key = KeyPair::generate()?;
 
         let mut params = CertificateParams::default();
+        params.is_ca = IsCa::NoCa;
         params
             .distinguished_name
             .push(DnType::CommonName, hostname);
         params.subject_alt_names = vec![SanType::DnsName(hostname.try_into()?)];
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.not_before = rcgen::date_time_ymd(2024, 1, 1);
         params.not_after = rcgen::date_time_ymd(2030, 1, 1);

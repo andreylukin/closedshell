@@ -46,6 +46,10 @@ fn generate_session_id() -> String {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -85,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         port: 8443,
     };
 
-    let (actual_port, proxy_handle) = match proxy.start().await {
+    let (actual_port, proxy_handle, proxy_stats) = match proxy.start().await {
         Ok(r) => r,
         Err(_) => {
             // Port 8443 taken, try OS-assigned
@@ -99,11 +103,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 6. Generate seatbelt profile, write to tmpdir
-    let profile = sandbox::generate_seatbelt_profile(
-        &config.sandbox.exec_allowlist,
-        &tmpdir,
-        actual_port,
-    );
+    let profile = sandbox::generate_seatbelt_profile(actual_port);
     let profile_path = tmpdir.join("profile.sb");
     std::fs::write(&profile_path, &profile)?;
 
@@ -144,8 +144,7 @@ async fn main() -> anyhow::Result<()> {
             "CLOSEDSHELL_SOCKET={}/ask.sock",
             tmpdir.display()
         ))
-        .arg(format!("CLOSEDSHELL_SESSION={}", session_id))
-        .arg("--");
+        .arg(format!("CLOSEDSHELL_SESSION={}", session_id));
 
     // Pass through credential env vars
     for cred in &config.sandbox.credentials {
@@ -174,8 +173,8 @@ async fn main() -> anyhow::Result<()> {
     let duration = start_time.elapsed();
     audit.log(AuditPayload::SessionEnd {
         duration_s: duration.as_secs(),
-        total_decisions: 0, // TODO: track in proxy
-        denied: 0,
+        total_decisions: proxy_stats.total(),
+        denied: 0, // YOLO mode never denies
     })?;
 
     proxy_handle.abort();
