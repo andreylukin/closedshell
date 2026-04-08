@@ -179,17 +179,10 @@ async fn main() -> anyhow::Result<()> {
         .arg(format!("CLOSEDSHELL_SOCKET={}/ask.sock", tmpdir.display()))
         .arg(format!("CLOSEDSHELL_SESSION={}", session_id));
 
-    // Pass through credential env vars
-    for cred in &config.sandbox.credentials {
-        if matches!(
-            cred.mount_type,
-            closedshell_lib::config::CredentialType::Env
-        ) {
-            for var in &cred.vars {
-                if let Ok(val) = std::env::var(var) {
-                    cmd.arg(format!("{}={}", var, val));
-                }
-            }
+    // Pass through configured env vars
+    for var in &config.sandbox.passthrough_env {
+        if let Ok(val) = std::env::var(var) {
+            cmd.arg(format!("{}={}", var, val));
         }
     }
 
