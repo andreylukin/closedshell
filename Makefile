@@ -27,15 +27,16 @@ fmt-fix:
 # Run all checks (what CI runs)
 check: fmt lint test
 
-# Install closedshell to ~/.cargo/bin
-install: release
-	cp target/release/closedshell ~/.cargo/bin/closedshell
-	@echo "Installed closedshell to ~/.cargo/bin/closedshell"
+# Install closedshell + ask to ~/.cargo/bin
+install:
+	cargo install --path crates/closedshell --force
+	cargo install --path crates/ask --force
+	@echo "Installed closedshell and ask to ~/.cargo/bin"
 
 # Uninstall
 uninstall:
-	rm -f ~/.cargo/bin/closedshell
-	@echo "Removed closedshell from ~/.cargo/bin"
+	rm -f ~/.cargo/bin/closedshell ~/.cargo/bin/ask
+	@echo "Removed closedshell and ask from ~/.cargo/bin"
 
 # Clean build artifacts
 clean:
