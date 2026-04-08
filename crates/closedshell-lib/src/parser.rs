@@ -44,6 +44,9 @@ pub fn parse_action(req: &RequestInfo) -> Action {
     if let Some(action) = try_parse_github(req) {
         return action;
     }
+    if let Some(action) = try_parse_azure(req) {
+        return action;
+    }
 
     parse_generic(req)
 }
@@ -225,6 +228,130 @@ fn parse_gcp_operation(service: &str, method: &str, segments: &[&str]) -> String
     // Join resource types with dots and append method
     let resource_path = resources.join(".");
     format!("{}.{}", resource_path, method_verb)
+}
+
+fn azure_method_verb(method: &str) -> &str {
+    match method {
+        "GET" => "get",
+        "POST" => "create",
+        "PUT" => "update",
+        "PATCH" => "patch",
+        "DELETE" => "delete",
+        other => other,
+    }
+}
+
+fn try_parse_azure(req: &RequestInfo) -> Option<Action> {
+    // Management plane: management.azure.com
+    if req.host == "management.azure.com" {
+        let segments: Vec<&str> = req.path.trim_start_matches('/').split('/').collect();
+
+        // Extract subscription
+        let subscription = segments
+            .iter()
+            .zip(segments.iter().skip(1))
+            .find(|(key, _)| key.eq_ignore_ascii_case("subscriptions"))
+            .map(|(_, val)| val.to_string())
+            .unwrap_or_else(|| "unknown".into());
+
+        // Find "providers/Microsoft.{Service}" and extract service + resource type
+        let mut service = String::new();
+        let mut resource_type = String::new();
+        for i in 0..segments.len() {
+            if segments[i].eq_ignore_ascii_case("providers") && i + 1 < segments.len() {
+                let namespace = segments[i + 1];
+                service = namespace
+                    .strip_prefix("Microsoft.")
+                    .unwrap_or(namespace)
+                    .to_string();
+                // Resource type is the next segment after the namespace
+                if i + 2 < segments.len() {
+                    resource_type = segments[i + 2].to_string();
+                }
+                break;
+            }
+        }
+
+        if service.is_empty() {
+            return None;
+        }
+
+        let verb = azure_method_verb(&req.method);
+        let operation = if resource_type.is_empty() {
+            verb.to_string()
+        } else {
+            format!("{}.{}", resource_type, verb)
+        };
+
+        let raw = format!(
+            "az[subscription={}]:{}:{}",
+            subscription, service, operation
+        );
+        let mut qualifier = HashMap::new();
+        qualifier.insert("subscription".into(), subscription);
+
+        return Some(Action {
+            provider: "az".into(),
+            qualifier,
+            service,
+            operation,
+            raw,
+        });
+    }
+
+    // Data plane hosts
+    let data_plane: Option<(&str, &str)> = if req.host.ends_with(".blob.core.windows.net") {
+        Some((
+            "storage.blob",
+            req.host.strip_suffix(".blob.core.windows.net")?,
+        ))
+    } else if req.host.ends_with(".table.core.windows.net") {
+        Some((
+            "storage.table",
+            req.host.strip_suffix(".table.core.windows.net")?,
+        ))
+    } else if req.host.ends_with(".queue.core.windows.net") {
+        Some((
+            "storage.queue",
+            req.host.strip_suffix(".queue.core.windows.net")?,
+        ))
+    } else if req.host.ends_with(".vault.azure.net") {
+        Some(("keyvault", req.host.strip_suffix(".vault.azure.net")?))
+    } else if req.host.ends_with(".database.windows.net") {
+        Some(("sql", req.host.strip_suffix(".database.windows.net")?))
+    } else if req.host.ends_with(".documents.azure.com") {
+        Some(("cosmosdb", req.host.strip_suffix(".documents.azure.com")?))
+    } else {
+        None
+    };
+
+    let (service, account) = data_plane?;
+
+    let verb = azure_method_verb(&req.method);
+    let path_segments: Vec<&str> = req
+        .path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let resource = path_segments.first().unwrap_or(&"");
+    let operation = if resource.is_empty() {
+        verb.to_string()
+    } else {
+        format!("{}.{}", resource, verb)
+    };
+
+    let raw = format!("az[account={}]:{}:{}", account, service, operation);
+    let mut qualifier = HashMap::new();
+    qualifier.insert("account".into(), account.to_string());
+
+    Some(Action {
+        provider: "az".into(),
+        qualifier,
+        service: service.into(),
+        operation,
+        raw,
+    })
 }
 
 fn try_parse_github(req: &RequestInfo) -> Option<Action> {
@@ -482,6 +609,71 @@ mod tests {
     #[test]
     fn test_non_github_not_matched() {
         let req = make_request("GET", "github.com", "/owner/repo");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "net");
+    }
+
+    // -- Azure tests --
+
+    #[test]
+    fn test_azure_management_compute_get() {
+        let req = make_request(
+            "GET",
+            "management.azure.com",
+            "/subscriptions/sub123/resourceGroups/rg1/providers/Microsoft.Compute/virtualMachines/vm1",
+        );
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "az");
+        assert_eq!(action.service, "Compute");
+        assert_eq!(action.operation, "virtualMachines.get");
+        assert_eq!(action.qualifier.get("subscription").unwrap(), "sub123");
+        assert_eq!(
+            action.canonical(),
+            "az[subscription=sub123]:Compute:virtualMachines.get"
+        );
+    }
+
+    #[test]
+    fn test_azure_management_storage_delete() {
+        let req = make_request(
+            "DELETE",
+            "management.azure.com",
+            "/subscriptions/sub456/resourceGroups/rg1/providers/Microsoft.Storage/storageAccounts/sa1",
+        );
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "az");
+        assert_eq!(action.service, "Storage");
+        assert_eq!(action.operation, "storageAccounts.delete");
+        assert_eq!(action.qualifier.get("subscription").unwrap(), "sub456");
+    }
+
+    #[test]
+    fn test_azure_blob_storage() {
+        let req = make_request("GET", "myaccount.blob.core.windows.net", "/container/blob");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "az");
+        assert_eq!(action.service, "storage.blob");
+        assert_eq!(action.operation, "container.get");
+        assert_eq!(action.qualifier.get("account").unwrap(), "myaccount");
+        assert_eq!(
+            action.canonical(),
+            "az[account=myaccount]:storage.blob:container.get"
+        );
+    }
+
+    #[test]
+    fn test_azure_keyvault() {
+        let req = make_request("GET", "myvault.vault.azure.net", "/secrets/mysecret");
+        let action = parse_action(&req);
+        assert_eq!(action.provider, "az");
+        assert_eq!(action.service, "keyvault");
+        assert_eq!(action.operation, "secrets.get");
+        assert_eq!(action.qualifier.get("account").unwrap(), "myvault");
+    }
+
+    #[test]
+    fn test_non_azure_not_matched() {
+        let req = make_request("GET", "azure.microsoft.com", "/something");
         let action = parse_action(&req);
         assert_eq!(action.provider, "net");
     }
