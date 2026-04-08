@@ -197,7 +197,12 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 6. Generate seatbelt profile, write to tmpdir
-    let profile = sandbox::generate_seatbelt_profile(actual_port);
+    let ipc_socket_path = format!("{}/ask.sock", tmpdir.display());
+    let profile = sandbox::generate_seatbelt_profile(
+        actual_port,
+        &ipc_socket_path,
+        &ca_key_path.to_string_lossy(),
+    );
     let profile_path = tmpdir.join("profile.sb");
     std::fs::write(&profile_path, &profile)?;
 

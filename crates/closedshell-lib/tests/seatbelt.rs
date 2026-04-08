@@ -35,7 +35,11 @@ fn sandbox_run(profile: &str, cmd: &[&str]) -> (i32, String, String) {
 
 #[test]
 fn seatbelt_allows_local_commands() {
-    let profile = generate_seatbelt_profile(8443);
+    let profile = generate_seatbelt_profile(
+        8443,
+        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/ca-key.pem",
+    );
     let (code, stdout, _) = sandbox_run(&profile, &["echo", "hello from sandbox"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("hello from sandbox"));
@@ -43,7 +47,11 @@ fn seatbelt_allows_local_commands() {
 
 #[test]
 fn seatbelt_blocks_outbound_network() {
-    let profile = generate_seatbelt_profile(8443);
+    let profile = generate_seatbelt_profile(
+        8443,
+        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/ca-key.pem",
+    );
     // curl to an external host should fail — seatbelt denies network-outbound
     // except localhost:8443. Use --connect-timeout to avoid hanging.
     let (code, _, _) = sandbox_run(
@@ -73,7 +81,11 @@ fn seatbelt_allows_localhost_proxy_port() {
         write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").unwrap();
     });
 
-    let profile = generate_seatbelt_profile(port);
+    let profile = generate_seatbelt_profile(
+        port,
+        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/ca-key.pem",
+    );
     let (code, stdout, _) = sandbox_run(
         &profile,
         &[
@@ -97,7 +109,11 @@ fn seatbelt_blocks_non_proxy_localhost_port() {
     let real_port = listener.local_addr().unwrap().port();
     let wrong_port = real_port.wrapping_add(1); // profile allows a different port
 
-    let profile = generate_seatbelt_profile(wrong_port);
+    let profile = generate_seatbelt_profile(
+        wrong_port,
+        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/ca-key.pem",
+    );
     let (code, _, _) = sandbox_run(
         &profile,
         &[
@@ -114,7 +130,11 @@ fn seatbelt_blocks_non_proxy_localhost_port() {
 
 #[test]
 fn seatbelt_allows_file_operations() {
-    let profile = generate_seatbelt_profile(8443);
+    let profile = generate_seatbelt_profile(
+        8443,
+        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/ca-key.pem",
+    );
     let (code, stdout, _) = sandbox_run(&profile, &["ls", "/"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("usr"), "should be able to list filesystem");

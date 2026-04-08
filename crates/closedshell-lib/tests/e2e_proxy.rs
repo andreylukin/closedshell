@@ -444,7 +444,7 @@ async fn test_aws_with_auth_header() {
     assert_eq!(decisions.len(), 1);
     let action = decisions[0]["action"].as_str().unwrap();
     assert!(action.starts_with("aws[profile="));
-    assert_eq!(action, "aws[profile=default]:s3:GetObject");
+    assert_eq!(action, "aws[profile=AKIAIOSFODNN7EXAMPLE]:s3:GetObject");
 }
 
 /// GET then POST on the same keepalive connection are independently parsed.

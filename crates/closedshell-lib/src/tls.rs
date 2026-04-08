@@ -69,6 +69,14 @@ impl SessionCA {
             }
             std::fs::write(cert_path, ca.ca_pem())?;
             std::fs::write(key_path, ca.ca_key.serialize_pem())?;
+
+            // Restrict CA private key to owner-only (0600)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))?;
+            }
+
             Ok(ca)
         }
     }

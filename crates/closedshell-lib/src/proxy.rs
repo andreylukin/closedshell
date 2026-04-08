@@ -158,7 +158,11 @@ async fn handle_client(
     // Drop the BufReader to get the stream back (no buffered data at this point)
     drop(buf_reader);
 
-    // Now do TLS handshake with the client using our session CA leaf cert
+    // Now do TLS handshake with the client using our session CA leaf cert.
+    // We generate the cert for the CONNECT hostname and configure rustls to
+    // verify that the client's SNI matches. If a malicious client sends
+    // CONNECT good.com but SNI evil.com, the handshake will fail because
+    // the cert CN/SAN won't match the SNI.
     let leaf = ca.generate_leaf_cert(&hostname)?;
 
     let leaf_cert = rustls_pemfile::certs(&mut Cursor::new(leaf.cert_pem.as_bytes()))
@@ -178,7 +182,23 @@ async fn handle_client(
     tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(tls_config));
-    let mut client_tls = acceptor.accept(stream).await?;
+    let client_tls = acceptor.accept(stream).await?;
+
+    // Validate that TLS SNI matches the CONNECT target hostname.
+    // Prevents a malicious client from CONNECTing to allowed-host.com
+    // but sending SNI for a different domain.
+    if let Some(sni) = client_tls.get_ref().1.server_name()
+        && sni != hostname
+    {
+        tracing::warn!(
+            connect_host = %hostname,
+            sni = %sni,
+            "SNI mismatch — rejecting connection"
+        );
+        anyhow::bail!("SNI '{}' does not match CONNECT target '{}'", sni, hostname);
+    }
+
+    let mut client_tls = client_tls;
 
     // Loop to handle HTTP/1.1 keepalive — multiple requests per connection
     loop {

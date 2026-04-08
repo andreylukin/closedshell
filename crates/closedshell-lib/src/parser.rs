@@ -128,11 +128,23 @@ fn parse_s3_rest_operation(method: &str, path: &str) -> String {
     }
 }
 
+/// Extract the AWS access key ID from the SigV4 Authorization header.
+///
+/// Format: `AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, ...`
+/// Returns the access key ID (e.g. "AKIAIOSFODNN7EXAMPLE") so the permission tree
+/// can differentiate between IAM identities. Falls back to "default" when absent.
 fn extract_aws_profile(req: &RequestInfo) -> String {
     if let Some(auth) = req.headers.get("authorization")
-        && auth.contains("Credential=")
+        && let Some(cred_start) = auth.find("Credential=")
     {
-        return "default".into();
+        let after_eq = &auth[cred_start + "Credential=".len()..];
+        // Access key ID is everything before the first '/'
+        if let Some(slash_pos) = after_eq.find('/') {
+            let access_key_id = &after_eq[..slash_pos];
+            if !access_key_id.is_empty() {
+                return access_key_id.to_string();
+            }
+        }
     }
     "default".into()
 }
@@ -542,6 +554,31 @@ mod tests {
         assert_eq!(action.provider, "aws");
         assert_eq!(action.service, "ec2");
         assert_eq!(action.operation, "DescribeInstances");
+    }
+
+    #[test]
+    fn test_aws_profile_from_sigv4() {
+        let mut req = make_request("GET", "s3.amazonaws.com", "/");
+        req.headers.insert(
+            "authorization".into(),
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=abc123".into(),
+        );
+        let action = parse_action(&req);
+        assert_eq!(
+            action.canonical(),
+            "aws[profile=AKIAIOSFODNN7EXAMPLE]:s3:ListBuckets"
+        );
+        assert_eq!(
+            action.qualifier.get("profile").unwrap(),
+            "AKIAIOSFODNN7EXAMPLE"
+        );
+    }
+
+    #[test]
+    fn test_aws_profile_default_without_auth() {
+        let req = make_request("GET", "s3.amazonaws.com", "/");
+        let action = parse_action(&req);
+        assert_eq!(action.qualifier.get("profile").unwrap(), "default");
     }
 
     #[test]
