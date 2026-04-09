@@ -12,30 +12,29 @@ Do NOT run any other commands (curl, aws, etc.) until you have submitted your pl
 
 ```
 $ ask why-denied
-```
-
-Then request permission if legitimately needed:
-```
 $ ask allow "the:canonical:action"
 ```
 
-Do NOT retry the denied request. Do NOT discuss workarounds. Simply check why it was denied and request permission.
+Run `ask why-denied` FIRST. Then request permission if needed. Never retry the denied request. Never suggest workarounds — just check the denial and request permission.
 
-## STEP 3: When your task scope changes
+## STEP 3: When your investigation reveals a different root cause
 
-If you discover the real problem is different from what you planned (e.g. you planned to check logs but found a database issue), you MUST run:
+Example: you planned to check logs, but logs reveal a database connection issue. The scope has changed. You MUST run `ask context` BEFORE touching any new service:
 
 ```
-$ ask context "updated task description"
+$ ask context "updated: investigating database connection exhaustion causing 500 errors"
+$ ask plan "need to check RDS instance configuration"
 ```
 
-BEFORE making any requests related to the new scope. Then use `ask plan` or `ask allow` for new permissions.
+This is REQUIRED any time the problem turns out to be in a different service or area than you originally planned for. The judge uses your context to decide what to approve — stale context means denials.
 
 ## Available commands
 
-- `ask plan "<goal>"` — FIRST. Always. Before anything else.
-- `ask status` — Check current permissions after planning.
-- `ask why-denied` — REQUIRED after any 403. Always run this.
-- `ask allow "<action>"` — Request specific permission.
-- `ask context "<task>"` — REQUIRED when task scope changes.
-- `ask what-can-i "<pattern>"` — Check if a pattern matches rules.
+| Command | When | Required? |
+|---------|------|-----------|
+| `ask plan "<goal>"` | Before ANY work | YES — always first |
+| `ask status` | After planning | Recommended |
+| `ask why-denied` | After any 403 | YES — always |
+| `ask allow "<action>"` | Need specific permission | As needed |
+| `ask context "<task>"` | Root cause differs from plan | YES — before new scope |
+| `ask what-can-i "<pattern>"` | Check rule match | Optional |
