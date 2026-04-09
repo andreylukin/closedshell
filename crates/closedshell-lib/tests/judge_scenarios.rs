@@ -9,7 +9,7 @@
 
 use closedshell_lib::config::JudgeConfig;
 use closedshell_lib::judge::{
-    classify_risk, HistoryEntry, JudgeClient, JudgeDecision, JudgeRequest, SessionContext,
+    HistoryEntry, JudgeClient, JudgeDecision, JudgeRequest, SessionContext, classify_risk,
 };
 use serde::Deserialize;
 use std::sync::Arc;

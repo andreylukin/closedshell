@@ -176,40 +176,39 @@ async fn main() -> anyhow::Result<()> {
     let audit = Arc::new(AuditLog::open(&std::env::current_dir()?, &session_id)?);
 
     // Build decider: --yolo > --template > --allow > default deny
-    let decider: Arc<dyn closedshell_lib::proxy::DecisionMaker> = if config.sandbox.yolo
-        && cli.template.is_empty()
-        && cli.allow.is_empty()
-    {
-        Arc::new(YoloDecider)
-    } else if !cli.template.is_empty() {
-        let tree = PermissionTree::new();
-        let templates_dir = config::resolve_tilde(&config.sandbox.templates_dir);
-        for name in &cli.template {
-            // Resolution order: exact path, path + .yaml, templates_dir/name.yaml
-            let raw = std::path::Path::new(name);
-            let path = if raw.exists() {
-                PathBuf::from(name)
-            } else if raw.with_extension("yaml").exists() {
-                raw.with_extension("yaml")
-            } else {
-                let mut p = PathBuf::from(&templates_dir);
-                p.push(format!("{}.yaml", name));
-                p
-            };
-            let yaml = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("failed to load template {}: {}", path.display(), e))?;
-            tree.load_template(&yaml)?;
-            tracing::info!(template = %path.display(), "loaded permission template");
-        }
-        Arc::new(tree)
-    } else if !cli.allow.is_empty() {
-        Arc::new(PatternDecider {
-            allow_patterns: cli.allow.clone(),
-        })
-    } else {
-        // No --yolo, no templates, no --allow: default deny everything
-        Arc::new(PermissionTree::new())
-    };
+    let decider: Arc<dyn closedshell_lib::proxy::DecisionMaker> =
+        if config.sandbox.yolo && cli.template.is_empty() && cli.allow.is_empty() {
+            Arc::new(YoloDecider)
+        } else if !cli.template.is_empty() {
+            let tree = PermissionTree::new();
+            let templates_dir = config::resolve_tilde(&config.sandbox.templates_dir);
+            for name in &cli.template {
+                // Resolution order: exact path, path + .yaml, templates_dir/name.yaml
+                let raw = std::path::Path::new(name);
+                let path = if raw.exists() {
+                    PathBuf::from(name)
+                } else if raw.with_extension("yaml").exists() {
+                    raw.with_extension("yaml")
+                } else {
+                    let mut p = PathBuf::from(&templates_dir);
+                    p.push(format!("{}.yaml", name));
+                    p
+                };
+                let yaml = std::fs::read_to_string(&path).map_err(|e| {
+                    anyhow::anyhow!("failed to load template {}: {}", path.display(), e)
+                })?;
+                tree.load_template(&yaml)?;
+                tracing::info!(template = %path.display(), "loaded permission template");
+            }
+            Arc::new(tree)
+        } else if !cli.allow.is_empty() {
+            Arc::new(PatternDecider {
+                allow_patterns: cli.allow.clone(),
+            })
+        } else {
+            // No --yolo, no templates, no --allow: default deny everything
+            Arc::new(PermissionTree::new())
+        };
 
     let proxy = MitmProxy {
         ca: ca.clone(),

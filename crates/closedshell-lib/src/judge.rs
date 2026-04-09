@@ -185,10 +185,11 @@ impl JudgeClient {
     /// - Optional certificate pinning via `tls_ca_cert` config
     pub fn new(mut config: JudgeConfig) -> anyhow::Result<Self> {
         // For anthropic provider, fall back to ANTHROPIC_KEY env var
-        if config.provider == "anthropic" && config.api_key.is_empty() {
-            if let Ok(key) = std::env::var("ANTHROPIC_KEY") {
-                config.api_key = key;
-            }
+        if config.provider == "anthropic"
+            && config.api_key.is_empty()
+            && let Ok(key) = std::env::var("ANTHROPIC_KEY")
+        {
+            config.api_key = key;
         }
 
         // Enforce TLS for non-localhost endpoints
@@ -332,10 +333,7 @@ impl JudgeClient {
     }
 
     async fn post_anthropic(&self, user_content: &str) -> anyhow::Result<String> {
-        let url = format!(
-            "{}/messages",
-            self.config.api_base.trim_end_matches('/')
-        );
+        let url = format!("{}/messages", self.config.api_base.trim_end_matches('/'));
         debug!("POST {} (anthropic)", url);
 
         let body = AnthropicRequest {
@@ -373,10 +371,13 @@ impl JudgeClient {
         let raw_body = resp.text().await?;
         debug!("anthropic raw response: {}", raw_body);
 
-        let anthropic_resp: AnthropicResponse =
-            serde_json::from_str(&raw_body).map_err(|e| {
-                anyhow::anyhow!("failed to parse anthropic response: {} (body: {})", e, raw_body)
-            })?;
+        let anthropic_resp: AnthropicResponse = serde_json::from_str(&raw_body).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse anthropic response: {} (body: {})",
+                e,
+                raw_body
+            )
+        })?;
         let content = anthropic_resp
             .content
             .into_iter()
