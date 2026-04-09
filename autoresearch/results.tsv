@@ -1,1 +1,6 @@
 commit	passed	total	description
+a075c91	11	14	baseline from v2-tool-reference
+f7a016b	13	15	exp1: stronger step-by-step, ONLY plan first, REQUIRED ask context
+b94c51a	14	15	exp2: concrete ask context example, table format, stale context warning
+b94c51a	15	16	exp2 confirmation run (picked up bonus check)
+4407c2e	13	14	exp3: don't discuss denied action — marginal, reverted to exp2
