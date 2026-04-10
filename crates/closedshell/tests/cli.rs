@@ -120,3 +120,144 @@ fn sandbox_env_vars_are_set() {
         "CLOSEDSHELL_SESSION should be set in sandbox"
     );
 }
+
+#[test]
+fn concurrent_sessions_get_unique_ids() {
+    use std::process::Command;
+    use std::thread;
+
+    let handles: Vec<_> = (0..3)
+        .map(|_| {
+            thread::spawn(|| {
+                let output = Command::new(closedshell_bin())
+                    .args(["--yolo", "env"])
+                    .current_dir(std::env::temp_dir())
+                    .output()
+                    .expect("failed to run closedshell");
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                assert_eq!(output.status.code().unwrap_or(-1), 0);
+                (stdout, stderr)
+            })
+        })
+        .collect();
+
+    let mut session_ids: Vec<String> = Vec::new();
+    let mut proxy_ports: Vec<String> = Vec::new();
+
+    for h in handles {
+        let (stdout, stderr) = h.join().unwrap();
+
+        // Extract session ID from env
+        let session = stdout
+            .lines()
+            .find(|l| l.starts_with("CLOSEDSHELL_SESSION="))
+            .expect("CLOSEDSHELL_SESSION not found")
+            .strip_prefix("CLOSEDSHELL_SESSION=")
+            .unwrap()
+            .to_string();
+        session_ids.push(session);
+
+        // Extract proxy port from HTTPS_PROXY env var
+        let proxy = stdout
+            .lines()
+            .find(|l| l.starts_with("HTTPS_PROXY="))
+            .expect("HTTPS_PROXY not found")
+            .to_string();
+        proxy_ports.push(proxy);
+
+        // Each session should show its own MOTD
+        assert!(
+            stderr.contains("[closedshell] session"),
+            "each session should have MOTD"
+        );
+    }
+
+    // All session IDs must be unique
+    let unique_sessions: std::collections::HashSet<&str> =
+        session_ids.iter().map(|s| s.as_str()).collect();
+    assert_eq!(
+        unique_sessions.len(),
+        3,
+        "3 concurrent sessions should have 3 unique IDs, got: {:?}",
+        session_ids
+    );
+}
+
+#[test]
+fn concurrent_sessions_create_separate_audit_logs() {
+    use std::thread;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+
+    let handles: Vec<_> = (0..3)
+        .map(|_| {
+            let dir = tmpdir.path().to_path_buf();
+            thread::spawn(move || {
+                let output = std::process::Command::new(closedshell_bin())
+                    .args(["--yolo", "echo", "audit-multi"])
+                    .current_dir(&dir)
+                    .output()
+                    .expect("failed to run closedshell");
+                assert_eq!(output.status.code().unwrap_or(-1), 0);
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let logs: Vec<_> = std::fs::read_dir(tmpdir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("closedshell-") && name.ends_with(".log")
+        })
+        .collect();
+
+    assert_eq!(
+        logs.len(),
+        3,
+        "3 concurrent sessions should create 3 audit log files, got: {}",
+        logs.len()
+    );
+
+    // Each log should have its own session_start and session_end
+    for log in &logs {
+        let content = std::fs::read_to_string(log.path()).unwrap();
+        let events: Vec<serde_json::Value> = content
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+
+        assert!(
+            events.iter().any(|e| e["event"] == "session_start"),
+            "log {:?} missing session_start",
+            log.file_name()
+        );
+        assert!(
+            events.iter().any(|e| e["event"] == "session_end"),
+            "log {:?} missing session_end",
+            log.file_name()
+        );
+    }
+
+    // All session IDs across logs should be unique
+    let session_ids: std::collections::HashSet<String> = logs
+        .iter()
+        .map(|log| {
+            let content = std::fs::read_to_string(log.path()).unwrap();
+            let event: serde_json::Value =
+                serde_json::from_str(content.lines().next().unwrap()).unwrap();
+            event["session"].as_str().unwrap().to_string()
+        })
+        .collect();
+
+    assert_eq!(
+        session_ids.len(),
+        3,
+        "each audit log should have a unique session ID"
+    );
+}

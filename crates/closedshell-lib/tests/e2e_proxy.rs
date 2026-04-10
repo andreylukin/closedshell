@@ -477,3 +477,167 @@ async fn test_keepalive_with_different_methods() {
     assert_eq!(decisions[1]["action"], "net:POST:example.com/resource");
     assert_eq!(decisions[1]["request"]["method"], "POST");
 }
+
+/// Multiple proxy instances can run concurrently on different ports.
+#[tokio::test]
+async fn test_multiple_proxies_different_ports() {
+    let tp1 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+    let tp2 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+    let tp3 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+
+    // Each proxy gets a unique port
+    assert_ne!(tp1.port, tp2.port);
+    assert_ne!(tp2.port, tp3.port);
+    assert_ne!(tp1.port, tp3.port);
+}
+
+/// Concurrent proxies have isolated audit logs — requests to one don't appear in another's log.
+#[tokio::test]
+async fn test_multiple_proxies_isolated_audit() {
+    let tp1 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+    let tp2 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+
+    let client1 = tp1.client();
+    let client2 = tp2.client();
+
+    // Send requests to proxy 1 only
+    let _ = client1.get("https://example.com/from-proxy1").send().await;
+    let _ = client1.get("https://example.com/also-proxy1").send().await;
+
+    // Send request to proxy 2 only
+    let _ = client2.get("https://example.com/from-proxy2").send().await;
+
+    let d1 = tp1.read_decisions();
+    let d2 = tp2.read_decisions();
+
+    assert_eq!(d1.len(), 2, "proxy1 should have exactly 2 decisions");
+    assert_eq!(d2.len(), 1, "proxy2 should have exactly 1 decision");
+
+    assert_eq!(d1[0]["request"]["path"], "/from-proxy1");
+    assert_eq!(d1[1]["request"]["path"], "/also-proxy1");
+    assert_eq!(d2[0]["request"]["path"], "/from-proxy2");
+}
+
+/// Concurrent proxies can have different deciders and enforce independently.
+#[tokio::test]
+async fn test_multiple_proxies_independent_policies() {
+    // Proxy 1: denies requests to example.com
+    let tp1 = TestProxy::start(Arc::new(DenyContaining("example.com".into()))).await;
+    // Proxy 2: denies requests to httpbin.org
+    let tp2 = TestProxy::start(Arc::new(DenyContaining("httpbin".into()))).await;
+
+    let c1 = tp1.client();
+    let c2 = tp2.client();
+
+    // example.com through proxy 1 → denied
+    let resp = c1.get("https://example.com/test").send().await.unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // httpbin through proxy 1 → allowed (denied actions contain "example.com", not "httpbin")
+    let _ = c1.get("https://httpbin.org/get").send().await;
+
+    // example.com through proxy 2 → allowed (denied actions contain "httpbin", not "example.com")
+    let _ = c2.get("https://example.com/test").send().await;
+
+    // httpbin through proxy 2 → denied
+    let resp = c2.get("https://httpbin.org/get").send().await.unwrap();
+    assert_eq!(resp.status(), 403);
+
+    let d1 = tp1.read_decisions();
+    let d2 = tp2.read_decisions();
+
+    assert_eq!(d1.len(), 2, "proxy1 decisions: {:?}", d1);
+    assert!(d1[0]["result"].as_str().unwrap().contains("deny")); // example.com denied
+    assert!(d1[1]["result"].as_str().unwrap().contains("allow")); // httpbin allowed
+
+    assert_eq!(d2.len(), 2, "proxy2 decisions: {:?}", d2);
+    assert!(d2[0]["result"].as_str().unwrap().contains("allow")); // example.com allowed
+    assert!(d2[1]["result"].as_str().unwrap().contains("deny")); // httpbin denied
+}
+
+/// Each proxy has its own session CA — a client trusting one CA cannot use the other proxy.
+#[tokio::test]
+async fn test_multiple_proxies_separate_cas() {
+    let tp1 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+    let tp2 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+
+    // CAs should be distinct key material
+    assert_ne!(tp1.ca.ca_pem(), tp2.ca.ca_pem());
+
+    // Client trusting tp1's CA, routed through tp2's port → TLS error
+    let cross_client = {
+        let ca_cert = reqwest::Certificate::from_pem(tp1.ca.ca_pem().as_bytes()).unwrap();
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::https(format!("http://127.0.0.1:{}", tp2.port)).unwrap())
+            .add_root_certificate(ca_cert)
+            .http1_only()
+            .build()
+            .unwrap()
+    };
+
+    let result = cross_client.get("https://example.com/cross").send().await;
+    assert!(
+        result.is_err(),
+        "cross-CA request should fail with TLS error"
+    );
+}
+
+/// Stats counters are independent across concurrent proxy instances.
+#[tokio::test]
+async fn test_multiple_proxies_independent_stats() {
+    let tp1 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+    let tp2 = TestProxy::start(Arc::new(DenyContaining("net".into()))).await;
+
+    let c1 = tp1.client();
+    let c2 = tp2.client();
+
+    // 3 requests to proxy 1
+    for i in 0..3 {
+        let _ = c1.get(format!("https://example.com/p1-{}", i)).send().await;
+    }
+
+    // 1 request to proxy 2
+    let _ = c2.get("https://example.com/p2-0").send().await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(tp1.stats.total(), 3);
+    assert_eq!(tp2.stats.total(), 1);
+}
+
+/// Many proxies can be started and used concurrently (stress test).
+#[tokio::test]
+async fn test_many_concurrent_proxies() {
+    let mut proxies = Vec::new();
+    for _ in 0..10 {
+        proxies.push(TestProxy::start(Arc::new(DenyContaining("net".into()))).await);
+    }
+
+    // All ports are unique
+    let ports: std::collections::HashSet<u16> = proxies.iter().map(|tp| tp.port).collect();
+    assert_eq!(ports.len(), 10, "all 10 proxies should have unique ports");
+
+    // Send a request through each proxy concurrently
+    let mut handles = Vec::new();
+    for (i, tp) in proxies.iter().enumerate() {
+        let client = tp.client();
+        handles.push(tokio::spawn(async move {
+            let resp = client
+                .get(format!("https://example.com/multi-{}", i))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), 403);
+        }));
+    }
+
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // Each proxy should have exactly 1 decision
+    for (i, tp) in proxies.iter().enumerate() {
+        let decisions = tp.read_decisions();
+        assert_eq!(decisions.len(), 1, "proxy {} should have 1 decision", i);
+        assert_eq!(decisions[0]["request"]["path"], format!("/multi-{}", i));
+    }
+}
