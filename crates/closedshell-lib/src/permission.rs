@@ -2,27 +2,27 @@ use std::sync::RwLock;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::parser::Action;
 use crate::proxy::{DecisionMaker, Verdict};
 
 /// Cedar-inspired permission effect.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
     Permit,
     Forbid,
 }
 
 /// Rule type for permits.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RuleType {
     Idempotent,
     OneShot { consumed: bool },
 }
 
 /// A single permission rule.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     pub id: String,
     pub effect: Effect,
@@ -173,6 +173,11 @@ impl PermissionTree {
                 && !is_expired(r, now)
                 && action_glob_match(&r.action, action_canonical)
         })
+    }
+
+    /// Replace all rules atomically (used for DB restore and hot-reload).
+    pub fn replace_rules(&self, rules: Vec<Rule>) {
+        *self.rules.write().unwrap() = rules;
     }
 
     pub fn rules(&self) -> Vec<Rule> {

@@ -64,6 +64,13 @@ pub enum AuditPayload {
         old_task: Option<String>,
         new_task: String,
     },
+    FileIo {
+        action: String,
+        result: String,
+        decided_by: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bytes: Option<u64>,
+    },
 }
 
 #[derive(Debug, Serialize)]

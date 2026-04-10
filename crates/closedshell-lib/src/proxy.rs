@@ -4,6 +4,7 @@
 //! request should be forwarded or blocked. In YOLO mode, [`YoloDecider`]
 //! allows everything.
 
+use crate::approval::{ApprovalQueue, ApprovalVerdict};
 use crate::audit::{AuditLog, AuditPayload, RequestMeta};
 use crate::ipc::{DenialInfo, SessionState};
 use crate::judge::{self, JudgeClient, JudgeDecision, JudgeRequest, SessionContext};
@@ -73,6 +74,7 @@ pub struct JudgeDecider {
     pub state: Arc<SessionState>,
     pub audit: Arc<AuditLog>,
     pub implicit_ask: bool,
+    pub approval_queue: Option<Arc<ApprovalQueue>>,
 }
 
 impl JudgeDecider {
@@ -148,17 +150,71 @@ impl JudgeDecider {
                 Verdict::Deny { reason }
             }
             JudgeDecision::EscalateHuman => {
-                let reason =
-                    "judge escalated to human — use `ask plan` to request approval".to_string();
-                self.state.record_denial(DenialInfo {
-                    action: canonical.to_string(),
-                    reason: reason.clone(),
-                    risk_tier: risk_tier.to_string(),
-                    hint: "ask plan \"describe your goal\"".to_string(),
-                });
-                self.state
-                    .record_decision(canonical, "deny", "judge-escalate");
-                Verdict::Deny { reason }
+                if let Some(ref queue) = self.approval_queue {
+                    // Park the request — proxy holds the connection until
+                    // a human approves/denies via TUI or the approval times out.
+                    let (approval_id, rx) =
+                        queue.enqueue(canonical.to_string(), risk_tier.to_string(), None);
+                    tracing::info!(
+                        action = canonical,
+                        id = %approval_id,
+                        "parked for human approval"
+                    );
+
+                    match rx.await {
+                        Ok(ApprovalVerdict::Approved) => {
+                            self.tree.add_rule(crate::permission::Rule {
+                                id: format!("human-{}", chrono::Utc::now().timestamp_millis()),
+                                effect: crate::permission::Effect::Permit,
+                                action: canonical.to_string(),
+                                rule_type: Some(crate::permission::RuleType::Idempotent),
+                                approved_by: Some("human".into()),
+                                source: Some("human-approval".into()),
+                                plan_id: None,
+                                reason: None,
+                                expires: None,
+                            });
+                            self.state.record_decision(canonical, "allow", "human");
+                            Verdict::Allow
+                        }
+                        Ok(ApprovalVerdict::Denied { reason }) => {
+                            self.state.record_denial(DenialInfo {
+                                action: canonical.to_string(),
+                                reason: reason.clone(),
+                                risk_tier: risk_tier.to_string(),
+                                hint: "human denied this action".to_string(),
+                            });
+                            self.state.record_decision(canonical, "deny", "human");
+                            Verdict::Deny { reason }
+                        }
+                        Err(_) => {
+                            // Channel dropped — treat as timeout/deny
+                            let reason = "approval timed out".to_string();
+                            self.state.record_denial(DenialInfo {
+                                action: canonical.to_string(),
+                                reason: reason.clone(),
+                                risk_tier: risk_tier.to_string(),
+                                hint: "ask plan \"describe your goal\"".to_string(),
+                            });
+                            self.state
+                                .record_decision(canonical, "deny", "approval-timeout");
+                            Verdict::Deny { reason }
+                        }
+                    }
+                } else {
+                    // No approval queue — fallback to immediate deny
+                    let reason =
+                        "judge escalated to human — use `ask plan` to request approval".to_string();
+                    self.state.record_denial(DenialInfo {
+                        action: canonical.to_string(),
+                        reason: reason.clone(),
+                        risk_tier: risk_tier.to_string(),
+                        hint: "ask plan \"describe your goal\"".to_string(),
+                    });
+                    self.state
+                        .record_decision(canonical, "deny", "judge-escalate");
+                    Verdict::Deny { reason }
+                }
             }
         }
     }

@@ -19,6 +19,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+chrono = { workspace = true }
+libc = "0.2"
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

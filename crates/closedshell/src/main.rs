@@ -1,8 +1,10 @@
 mod tui;
 
 use clap::Parser;
+use closedshell_lib::approval::ApprovalQueue;
 use closedshell_lib::audit::{AuditLog, AuditPayload};
 use closedshell_lib::config::{self, CliFlags};
+use closedshell_lib::db::{RuleRow, SessionDb, SessionRow};
 use closedshell_lib::ipc::{
     IpcHandler, IpcServer, ProductionIpcHandler, SessionState, YoloIpcHandler,
 };
@@ -34,9 +36,9 @@ struct Cli {
     #[arg(long)]
     no_motd: bool,
 
-    /// Ignore existing session, start clean
+    /// Resume rules from previous session in this directory
     #[arg(long)]
-    fresh: bool,
+    resume: bool,
 
     /// Allow actions matching this glob pattern (repeatable, default deny when set)
     #[arg(long)]
@@ -128,15 +130,24 @@ async fn main() -> anyhow::Result<()> {
         return tui::run(session_id);
     }
 
-    // Normal mode: command is required
+    // No-args mode: show session list
     if cli.command.is_empty() {
-        anyhow::bail!("command is required (e.g., closedshell -- claude)");
+        let db_path = if let Ok(p) = std::env::var("CLOSEDSHELL_DB") {
+            PathBuf::from(p)
+        } else {
+            let home = PathBuf::from(std::env::var("HOME").unwrap());
+            let cs_dir = home.join(".closedshell");
+            std::fs::create_dir_all(&cs_dir)?;
+            cs_dir.join("sessions.db")
+        };
+        let db = SessionDb::open(&db_path)?;
+        return tui::run_session_list(&db);
     }
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .init();
 
@@ -149,34 +160,62 @@ async fn main() -> anyhow::Result<()> {
     };
     config.merge_cli_flags(&flags);
 
-    // 2. Generate session ID
-    let session_id = generate_session_id();
-
-    // 2b. Resolve task: --task flag > interactive prompt (enforcing + TTY) > None
-    let task = if let Some(t) = cli.task.clone() {
-        Some(t)
-    } else if !config.sandbox.yolo && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        eprintln!("[closedshell] session {session_id}");
-        eprint!("[closedshell] Task: ");
-        let mut task = String::new();
-        std::io::stdin().read_line(&mut task)?;
-        let task = task.trim().to_string();
-        if task.is_empty() {
-            anyhow::bail!("task is required — describe what the agent should do");
-        }
-        eprintln!();
-        Some(task)
+    // 2. Open SQLite database
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let cs_dir = home.join(".closedshell");
+    std::fs::create_dir_all(&cs_dir)?;
+    let db_path = if let Ok(p) = std::env::var("CLOSEDSHELL_DB") {
+        PathBuf::from(p)
     } else {
-        None
+        cs_dir.join("sessions.db")
     };
+    let db = Arc::new(SessionDb::open(&db_path)?);
+
+    // Crash recovery: mark sessions whose PIDs are dead
+    for row in db.find_running()? {
+        let pid_alive = unsafe { libc::kill(row.pid as i32, 0) } == 0;
+        if !pid_alive {
+            db.mark_crashed(&row.id)?;
+            tracing::info!(session = %row.id, pid = row.pid, "marked crashed session");
+        }
+    }
+
+    // 2b. Build permission tree early (may be populated by session restore)
+    let tree = Arc::new(PermissionTree::new());
+
+    // 2c. Session resume or new session
+    // Always generate a fresh session ID (avoids tmpdir/audit-log conflicts).
+    // Resume only restores the permission tree rules from the previous session.
+    let cwd = std::env::current_dir()?.to_string_lossy().to_string();
+    let session_id = generate_session_id();
+    let is_resumed = if cli.resume {
+        if let Some(existing) = db.find_by_workdir(&cwd)? {
+            let rule_rows = db.load_rules(&existing.id)?;
+            let rules: Vec<closedshell_lib::permission::Rule> = rule_rows
+                .iter()
+                .filter_map(|r| serde_json::from_str(&r.rule_json).ok())
+                .collect();
+            let rule_count = rules.len();
+            tree.replace_rules(rules);
+            tracing::info!(
+                session = %session_id,
+                previous = %existing.id,
+                rules = rule_count,
+                "restored rules from previous session"
+            );
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let task = cli.task.clone();
 
     // 3. Create tmpdir
     let tmpdir = PathBuf::from(format!("/private/tmp/closedshell-{}", session_id));
     std::fs::create_dir_all(&tmpdir)?;
-
-    // 4. Load persistent CA from ~/.closedshell/ (or create on first run)
-    let home = PathBuf::from(std::env::var("HOME").unwrap());
-    let cs_dir = home.join(".closedshell");
     let ca_cert_path = cs_dir.join("ca.pem");
     let ca_key_path = cs_dir.join("ca-key.pem");
     let is_new_ca = !ca_cert_path.exists();
@@ -212,10 +251,7 @@ async fn main() -> anyhow::Result<()> {
     // 5. Start MITM proxy
     let audit = Arc::new(AuditLog::open(&std::env::current_dir()?, &session_id)?);
 
-    // Build permission tree (shared across decider + IPC handler)
-    let tree = Arc::new(PermissionTree::new());
-
-    // Load templates into tree
+    // Load templates into tree (on top of any restored rules)
     if !cli.template.is_empty() {
         let templates_dir = config::resolve_tilde(&config.sandbox.templates_dir);
         for name in &cli.template {
@@ -243,6 +279,9 @@ async fn main() -> anyhow::Result<()> {
         state.set_task(t.clone());
     }
 
+    // Build approval queue (used in enforcing mode)
+    let approval_queue = Arc::new(ApprovalQueue::new());
+
     // Build decider + IPC handler: yolo vs enforcing
     let (decider, ipc_handler): (Arc<dyn DecisionMaker>, Arc<dyn IpcHandler>) =
         if config.sandbox.yolo {
@@ -268,12 +307,14 @@ async fn main() -> anyhow::Result<()> {
                     state: state.clone(),
                     audit: audit.clone(),
                     implicit_ask: config.sandbox.implicit_ask,
+                    approval_queue: Some(approval_queue.clone()),
                 }) as Arc<dyn DecisionMaker>,
                 Arc::new(ProductionIpcHandler {
                     tree: tree.clone(),
                     judge,
                     state: state.clone(),
                     audit: audit.clone(),
+                    approval_queue: Some(approval_queue.clone()),
                 }) as Arc<dyn IpcHandler>,
             )
         };
@@ -321,7 +362,8 @@ async fn main() -> anyhow::Result<()> {
         } else {
             "enforcing"
         };
-        eprintln!("[closedshell] session {} (new)", session_id);
+        let session_tag = if is_resumed { "resumed" } else { "new" };
+        eprintln!("[closedshell] session {} ({})", session_id, session_tag);
         if let Some(ref t) = task {
             eprintln!("[closedshell] task: {}", t);
         }
@@ -338,6 +380,26 @@ async fn main() -> anyhow::Result<()> {
         templates: cli.template.clone(),
         yolo: config.sandbox.yolo,
     })?;
+
+    // Register new session in DB (always a new row since we always generate a fresh ID)
+    let now = chrono::Utc::now().to_rfc3339();
+    {
+        db.create_session(&SessionRow {
+            id: session_id.clone(),
+            workdir: cwd.clone(),
+            command: cli.command.join(" "),
+            task: task.clone(),
+            status: "running".into(),
+            templates: serde_json::to_string(&cli.template).unwrap_or_default(),
+            pid: std::process::id() as i64,
+            port: actual_port,
+            log_path: audit.path.to_string_lossy().to_string(),
+            created_at: now.clone(),
+            last_used: now,
+            total_decisions: 0,
+            total_denied: 0,
+        })?;
+    }
 
     let start_time = std::time::Instant::now();
 
@@ -396,11 +458,51 @@ async fn main() -> anyhow::Result<()> {
 
     // 11. Cleanup (always runs, even on signal)
     let duration = start_time.elapsed();
+    let total_decisions = proxy_stats.total();
     audit.log(AuditPayload::SessionEnd {
         duration_s: duration.as_secs(),
-        total_decisions: proxy_stats.total(),
-        denied: 0, // YOLO mode never denies
+        total_decisions,
+        denied: 0,
     })?;
+
+    // Persist permission tree to SQLite
+    let current_rules = tree.rules();
+    let rule_rows: Vec<RuleRow> = current_rules
+        .iter()
+        .filter(|r| {
+            // Skip consumed one-shot rules
+            !matches!(
+                r.rule_type,
+                Some(closedshell_lib::permission::RuleType::OneShot { consumed: true })
+            )
+        })
+        .map(|r| {
+            let effect_str = match r.effect {
+                closedshell_lib::permission::Effect::Permit => "permit",
+                closedshell_lib::permission::Effect::Forbid => "forbid",
+            };
+            let type_str = r.rule_type.as_ref().map(|rt| match rt {
+                closedshell_lib::permission::RuleType::Idempotent => "idempotent".to_string(),
+                closedshell_lib::permission::RuleType::OneShot { .. } => "one-shot".to_string(),
+            });
+            RuleRow {
+                id: r.id.clone(),
+                session_id: session_id.clone(),
+                effect: effect_str.into(),
+                action: r.action.clone(),
+                rule_type: type_str,
+                rule_json: serde_json::to_string(r).unwrap_or_default(),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }
+        })
+        .collect();
+
+    if let Err(e) = db.persist_rules(&session_id, &rule_rows) {
+        tracing::warn!("failed to persist rules: {}", e);
+    }
+    if let Err(e) = db.update_session(&session_id, "ended", total_decisions, 0) {
+        tracing::warn!("failed to update session: {}", e);
+    }
 
     proxy_handle.abort();
     ipc_handle.abort();
@@ -411,6 +513,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         session = %session_id,
         duration_s = duration.as_secs(),
+        rules_persisted = rule_rows.len(),
         "session ended"
     );
 

@@ -21,9 +21,16 @@ fn closedshell_bin() -> PathBuf {
 }
 
 fn run_closedshell(args: &[&str]) -> (i32, String, String) {
+    run_closedshell_in(args, std::env::temp_dir())
+}
+
+fn run_closedshell_in(args: &[&str], dir: std::path::PathBuf) -> (i32, String, String) {
+    // Each test gets its own SQLite DB to avoid contention
+    let db_path = dir.join("test-sessions.db");
     let output = Command::new(closedshell_bin())
         .args(args)
-        .current_dir(std::env::temp_dir())
+        .current_dir(&dir)
+        .env("CLOSEDSHELL_DB", &db_path)
         .output()
         .expect("failed to run closedshell binary");
     (
@@ -73,6 +80,7 @@ fn audit_log_is_created() {
     let output = Command::new(closedshell_bin())
         .args(["--yolo", "echo", "audit-test"])
         .current_dir(tmpdir.path())
+        .env("CLOSEDSHELL_DB", tmpdir.path().join("test.db"))
         .output()
         .expect("failed to run closedshell");
     assert_eq!(output.status.code().unwrap_or(-1), 0);
@@ -127,11 +135,14 @@ fn concurrent_sessions_get_unique_ids() {
     use std::thread;
 
     let handles: Vec<_> = (0..3)
-        .map(|_| {
-            thread::spawn(|| {
+        .map(|i| {
+            thread::spawn(move || {
+                let tmpdir = tempfile::tempdir().unwrap();
+                let db = tmpdir.path().join(format!("test-{}.db", i));
                 let output = Command::new(closedshell_bin())
                     .args(["--yolo", "env"])
                     .current_dir(std::env::temp_dir())
+                    .env("CLOSEDSHELL_DB", &db)
                     .output()
                     .expect("failed to run closedshell");
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -191,12 +202,13 @@ fn concurrent_sessions_create_separate_audit_logs() {
     let tmpdir = tempfile::tempdir().unwrap();
 
     let handles: Vec<_> = (0..3)
-        .map(|_| {
+        .map(|i| {
             let dir = tmpdir.path().to_path_buf();
             thread::spawn(move || {
                 let output = std::process::Command::new(closedshell_bin())
                     .args(["--yolo", "echo", "audit-multi"])
                     .current_dir(&dir)
+                    .env("CLOSEDSHELL_DB", dir.join(format!("test-{}.db", i)))
                     .output()
                     .expect("failed to run closedshell");
                 assert_eq!(output.status.code().unwrap_or(-1), 0);

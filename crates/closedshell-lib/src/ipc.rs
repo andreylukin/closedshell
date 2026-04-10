@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 
+use crate::approval::{ApprovalQueue, ApprovalVerdict};
 use crate::judge::HistoryEntry;
 
 // -- Session state: shared between proxy decider and IPC handler --
@@ -92,6 +93,10 @@ pub enum IpcRequest {
     Context { task: String },
     Read { path: String },
     Write { path: String, content: String },
+    PendingApprovals,
+    Approve { id: String },
+    Deny { id: String, reason: Option<String> },
+    DeleteRule { rule_id: String },
 }
 
 /// Response back to ask CLI
@@ -253,6 +258,13 @@ impl IpcHandler for YoloIpcHandler {
                     None,
                 ),
             },
+            IpcRequest::PendingApprovals => IpcResponse::ok(serde_json::json!({ "pending": [] })),
+            IpcRequest::Approve { .. } | IpcRequest::Deny { .. } => {
+                IpcResponse::err("no_queue", "no approval queue in yolo mode", None)
+            }
+            IpcRequest::DeleteRule { .. } => {
+                IpcResponse::err("no_rules", "no rules in yolo mode", None)
+            }
         }
     }
 }
@@ -263,6 +275,7 @@ pub struct ProductionIpcHandler {
     pub judge: Arc<crate::judge::JudgeClient>,
     pub state: Arc<SessionState>,
     pub audit: Arc<crate::audit::AuditLog>,
+    pub approval_queue: Option<Arc<ApprovalQueue>>,
 }
 
 impl IpcHandler for ProductionIpcHandler {
@@ -278,10 +291,17 @@ impl IpcHandler for ProductionIpcHandler {
                             crate::permission::Effect::Permit => "permit",
                             crate::permission::Effect::Forbid => "forbid",
                         };
+                        let rule_type = r.rule_type.as_ref().map(|rt| match rt {
+                            crate::permission::RuleType::Idempotent => "idempotent",
+                            crate::permission::RuleType::OneShot { .. } => "one-shot",
+                        });
                         serde_json::json!({
+                            "id": r.id,
                             "effect": effect,
                             "pattern": r.action,
                             "source": r.source,
+                            "rule_type": rule_type,
+                            "reason": r.reason,
                         })
                     })
                     .collect();
@@ -498,30 +518,239 @@ impl IpcHandler for ProductionIpcHandler {
                 }))
             }
 
-            // File I/O — same as YOLO (direct filesystem)
-            IpcRequest::Read { ref path } => match std::fs::read_to_string(path) {
-                Ok(content) => IpcResponse::ok(serde_json::json!({
-                    "content": content,
-                })),
-                Err(e) => IpcResponse::err(
-                    "read_error",
-                    &format!("failed to read {}: {}", path, e),
-                    None,
-                ),
-            },
+            // File I/O — evaluated against permission tree
+            IpcRequest::Read { ref path } => {
+                let canonical = format!("file:read:{}", path);
+                match self.check_file_permission(&canonical) {
+                    Ok(()) => {
+                        let _ = self.audit.log(crate::audit::AuditPayload::FileIo {
+                            action: canonical,
+                            result: "allow".into(),
+                            decided_by: "tree".into(),
+                            bytes: None,
+                        });
+                        match std::fs::read_to_string(path) {
+                            Ok(content) => IpcResponse::ok(serde_json::json!({
+                                "content": content,
+                            })),
+                            Err(e) => IpcResponse::err(
+                                "read_error",
+                                &format!("failed to read {}: {}", path, e),
+                                None,
+                            ),
+                        }
+                    }
+                    Err(reason) => {
+                        let _ = self.audit.log(crate::audit::AuditPayload::FileIo {
+                            action: canonical,
+                            result: format!("deny: {}", reason),
+                            decided_by: "tree".into(),
+                            bytes: None,
+                        });
+                        IpcResponse::err("not_permitted", &reason, None)
+                    }
+                }
+            }
             IpcRequest::Write {
                 ref path,
                 ref content,
-            } => match std::fs::write(path, content) {
-                Ok(()) => IpcResponse::ok(serde_json::json!({
-                    "bytes_written": content.len(),
-                })),
-                Err(e) => IpcResponse::err(
-                    "write_error",
-                    &format!("failed to write {}: {}", path, e),
-                    None,
-                ),
-            },
+            } => {
+                let canonical = format!("file:write:{}", path);
+                match self.check_file_permission(&canonical) {
+                    Ok(()) => {
+                        let _ = self.audit.log(crate::audit::AuditPayload::FileIo {
+                            action: canonical,
+                            result: "allow".into(),
+                            decided_by: "tree".into(),
+                            bytes: Some(content.len() as u64),
+                        });
+                        match std::fs::write(path, content) {
+                            Ok(()) => IpcResponse::ok(serde_json::json!({
+                                "bytes_written": content.len(),
+                            })),
+                            Err(e) => IpcResponse::err(
+                                "write_error",
+                                &format!("failed to write {}: {}", path, e),
+                                None,
+                            ),
+                        }
+                    }
+                    Err(reason) => {
+                        let _ = self.audit.log(crate::audit::AuditPayload::FileIo {
+                            action: canonical,
+                            result: format!("deny: {}", reason),
+                            decided_by: "tree".into(),
+                            bytes: None,
+                        });
+                        IpcResponse::err("not_permitted", &reason, None)
+                    }
+                }
+            }
+
+            // Approval queue commands
+            IpcRequest::PendingApprovals => {
+                if let Some(ref queue) = self.approval_queue {
+                    let pending: Vec<serde_json::Value> = queue
+                        .list_pending()
+                        .iter()
+                        .map(|p| {
+                            serde_json::json!({
+                                "id": p.id,
+                                "action": p.action,
+                                "risk_tier": p.risk_tier,
+                                "plan_id": p.plan_id,
+                                "age_s": p.created_at.elapsed().as_secs(),
+                                "created_at": p.created_at_rfc3339,
+                            })
+                        })
+                        .collect();
+                    IpcResponse::ok(serde_json::json!({ "pending": pending }))
+                } else {
+                    IpcResponse::ok(serde_json::json!({ "pending": [] }))
+                }
+            }
+            IpcRequest::Approve { ref id } => {
+                if let Some(ref queue) = self.approval_queue {
+                    match queue.resolve(id, ApprovalVerdict::Approved) {
+                        Ok(info) => {
+                            // Add permit rule for the approved action
+                            self.tree.add_rule(crate::permission::Rule {
+                                id: format!("human-{}", chrono::Utc::now().timestamp_millis()),
+                                effect: crate::permission::Effect::Permit,
+                                action: info.action.clone(),
+                                rule_type: Some(crate::permission::RuleType::Idempotent),
+                                approved_by: Some("human".into()),
+                                source: Some("human-approval".into()),
+                                plan_id: info.plan_id.clone(),
+                                reason: None,
+                                expires: None,
+                            });
+                            IpcResponse::ok(serde_json::json!({
+                                "approved": true,
+                                "action": info.action,
+                            }))
+                        }
+                        Err(e) => IpcResponse::err("not_found", &e.to_string(), None),
+                    }
+                } else {
+                    IpcResponse::err("no_queue", "approval queue not configured", None)
+                }
+            }
+            IpcRequest::Deny { ref id, ref reason } => {
+                if let Some(ref queue) = self.approval_queue {
+                    let reason_str = reason.as_deref().unwrap_or("denied by human").to_string();
+                    match queue.resolve(id, ApprovalVerdict::Denied { reason: reason_str }) {
+                        Ok(info) => IpcResponse::ok(serde_json::json!({
+                            "denied": true,
+                            "action": info.action,
+                        })),
+                        Err(e) => IpcResponse::err("not_found", &e.to_string(), None),
+                    }
+                } else {
+                    IpcResponse::err("no_queue", "approval queue not configured", None)
+                }
+            }
+            IpcRequest::DeleteRule { ref rule_id } => {
+                if self.tree.remove_rule(rule_id) {
+                    IpcResponse::ok(serde_json::json!({ "deleted": true, "rule_id": rule_id }))
+                } else {
+                    IpcResponse::err("not_found", &format!("rule {} not found", rule_id), None)
+                }
+            }
+        }
+    }
+}
+
+impl ProductionIpcHandler {
+    /// Check file action against the permission tree.
+    /// Returns Ok(()) if permitted, Err(reason) if denied.
+    fn check_file_permission(&self, canonical: &str) -> Result<(), String> {
+        match self.tree.evaluate(canonical) {
+            crate::permission::TreeVerdict::Allow => {
+                self.state.record_decision(canonical, "allow", "tree");
+                Ok(())
+            }
+            crate::permission::TreeVerdict::Deny { reason } => {
+                // If there's an explicit forbid, hard deny
+                if self.tree.has_forbid(canonical) {
+                    self.state.record_denial(DenialInfo {
+                        action: canonical.to_string(),
+                        reason: reason.clone(),
+                        risk_tier: "safe".into(),
+                        hint: "this file action is explicitly forbidden".into(),
+                    });
+                    self.state.record_decision(canonical, "deny", "forbid");
+                    return Err(reason);
+                }
+
+                // No explicit forbid, no permit — consult judge
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let risk_tier = crate::judge::classify_risk(canonical);
+                        let req = crate::judge::JudgeRequest {
+                            requested_action: canonical.to_string(),
+                            current_tree: self
+                                .tree
+                                .rules()
+                                .iter()
+                                .map(|r| {
+                                    let effect = match r.effect {
+                                        crate::permission::Effect::Permit => "permit",
+                                        crate::permission::Effect::Forbid => "forbid",
+                                    };
+                                    format!("{} {}", effect, r.action)
+                                })
+                                .collect(),
+                            session_context: crate::judge::SessionContext {
+                                task: self.state.snapshot_task(),
+                            },
+                            history: self.state.snapshot_history(),
+                            risk_tier: risk_tier.to_string(),
+                            implicit: true,
+                        };
+
+                        self.judge.evaluate_action(req).await
+                    })
+                });
+
+                match result {
+                    crate::judge::JudgeDecision::Approve => {
+                        self.tree.add_rule(crate::permission::Rule {
+                            id: format!("judge-file-{}", chrono::Utc::now().timestamp_millis()),
+                            effect: crate::permission::Effect::Permit,
+                            action: canonical.to_string(),
+                            rule_type: Some(crate::permission::RuleType::Idempotent),
+                            approved_by: Some("judge".into()),
+                            source: Some("implicit-ask".into()),
+                            plan_id: None,
+                            reason: None,
+                            expires: None,
+                        });
+                        self.state.record_decision(canonical, "allow", "judge");
+                        Ok(())
+                    }
+                    crate::judge::JudgeDecision::Deny { reason } => {
+                        self.state.record_denial(DenialInfo {
+                            action: canonical.to_string(),
+                            reason: reason.clone(),
+                            risk_tier: "safe".into(),
+                            hint: format!("ask allow \"{}\"", canonical),
+                        });
+                        self.state.record_decision(canonical, "deny", "judge");
+                        Err(reason)
+                    }
+                    crate::judge::JudgeDecision::EscalateHuman => {
+                        let reason = "escalated to human approval".to_string();
+                        self.state.record_denial(DenialInfo {
+                            action: canonical.to_string(),
+                            reason: reason.clone(),
+                            risk_tier: "moderate".into(),
+                            hint: "ask plan \"describe your goal\"".into(),
+                        });
+                        Err(reason)
+                    }
+                }
+            }
         }
     }
 }
