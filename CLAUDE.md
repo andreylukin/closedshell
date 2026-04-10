@@ -7,12 +7,21 @@ ClosedShell: control the network, let the agent roam free. A macOS sandbox for A
 ## Build
 
 ```bash
-cargo build                          # build
-cargo test                           # all tests
+make build                           # dev build
+make release                         # optimized release build
+make test                            # all tests
+make lint                            # clippy (fail on warnings)
+make fmt                             # check formatting
+make fmt-fix                         # fix formatting
+make check                           # fmt + lint + test (what CI runs)
+make install                         # install both binaries to ~/.cargo/bin
+make clean                           # clean build artifacts
+```
+
+Single test / single crate:
+```bash
 cargo test <name>                    # single test
 cargo test -p <crate>                # one crate's tests
-cargo clippy -- -D warnings          # lint
-cargo fmt --check                    # format check
 ```
 
 ## Architecture
@@ -35,13 +44,35 @@ crates/
 docs/                # spec (DO NOT MODIFY — treat as requirements)
 ```
 
-## Current Phase: YOLO Shell
+## Usage
 
-Log-only sandbox: intercept all HTTPS, parse into actions, log everything, block nothing.
+```bash
+# YOLO mode — log everything, block nothing
+cs --yolo -- claude
+
+# Enforcing mode — judge evaluates unknown actions against task scope
+cs --template anthropic/full --task "describe what the agent should do" -- claude
+```
+
+**Templates** pre-approve infra the agent needs to function. Without `--template anthropic/full`, Claude Code's own API calls get blocked by the judge.
+
+Templates live in `~/.closedshell/templates/` and can also be referenced by absolute path. Bundled templates are in `templates/` in the repo — copy them to `~/.closedshell/templates/` or use `make install`.
+
+Available templates:
+- `anthropic/full` — permits `api.anthropic.com`, `mcp-proxy.anthropic.com`, `downloads.claude.ai`, Claude Code storage
+
+**`--task`** sets the session task. In enforcing mode, the judge uses it as context to decide whether non-template actions should be allowed. For example, `--task "search for Boston chocolate places"` would cause the judge to deny Exa searches for unrelated topics.
+
+## Modes
+
+| Mode | Flag | Behavior |
+|------|------|----------|
+| YOLO | `--yolo` | Log all HTTPS, block nothing |
+| Enforcing | (default) | Template permits → allow. Explicit forbids → deny. Unknown → judge evaluates against task |
 
 ## Build Order
 
-1. **YOLO Shell** (current) — sandbox + proxy + parsers + audit logging
-2. Permission Tree
-3. Judge Integration
+1. ~~YOLO Shell~~ ✓
+2. ~~Permission Tree~~ ✓
+3. ~~Judge Integration~~ ✓
 4. TUI + Human Approval

@@ -47,6 +47,23 @@ pub enum AuditPayload {
         total_decisions: u64,
         denied: u64,
     },
+    Judge {
+        action: String,
+        decision: String,
+        risk_tier: String,
+        latency_ms: u64,
+        implicit: bool,
+    },
+    Plan {
+        plan_id: String,
+        description: String,
+        auto_approved: u32,
+        pending_human: u32,
+    },
+    Context {
+        old_task: Option<String>,
+        new_task: String,
+    },
 }
 
 #[derive(Debug, Serialize)]

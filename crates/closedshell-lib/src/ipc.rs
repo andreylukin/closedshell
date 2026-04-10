@@ -1,8 +1,83 @@
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
+
+use crate::judge::HistoryEntry;
+
+// -- Session state: shared between proxy decider and IPC handler --
+
+const MAX_HISTORY: usize = 20;
+
+/// Last denial info, returned by `ask why-denied`.
+#[derive(Debug, Clone)]
+pub struct DenialInfo {
+    pub action: String,
+    pub reason: String,
+    pub risk_tier: String,
+    pub hint: String,
+}
+
+/// Shared mutable session state.
+pub struct SessionState {
+    task: Mutex<Option<String>>,
+    last_denial: Mutex<Option<DenialInfo>>,
+    history: Mutex<VecDeque<HistoryEntry>>,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionState {
+    pub fn new() -> Self {
+        Self {
+            task: Mutex::new(None),
+            last_denial: Mutex::new(None),
+            history: Mutex::new(VecDeque::with_capacity(MAX_HISTORY)),
+        }
+    }
+
+    pub fn set_task(&self, task: String) -> Option<String> {
+        let mut t = self.task.lock().unwrap();
+        let old = t.take();
+        *t = Some(task);
+        old
+    }
+
+    pub fn snapshot_task(&self) -> Option<String> {
+        self.task.lock().unwrap().clone()
+    }
+
+    pub fn record_decision(&self, action: &str, decision: &str, by: &str) {
+        let mut history = self.history.lock().unwrap();
+        if history.len() >= MAX_HISTORY {
+            history.pop_front();
+        }
+        history.push_back(HistoryEntry {
+            action: action.to_string(),
+            decision: decision.to_string(),
+            by: by.to_string(),
+            t: chrono::Utc::now().timestamp(),
+        });
+    }
+
+    pub fn record_denial(&self, info: DenialInfo) {
+        *self.last_denial.lock().unwrap() = Some(info);
+    }
+
+    pub fn last_denial(&self) -> Option<DenialInfo> {
+        self.last_denial.lock().unwrap().clone()
+    }
+
+    pub fn snapshot_history(&self) -> Vec<HistoryEntry> {
+        self.history.lock().unwrap().iter().cloned().collect()
+    }
+}
 
 /// Request types from the ask CLI
 #[derive(Debug, Deserialize)]
@@ -155,6 +230,275 @@ impl IpcHandler for YoloIpcHandler {
                 "task": task,
                 "accepted": true,
             })),
+            IpcRequest::Read { ref path } => match std::fs::read_to_string(path) {
+                Ok(content) => IpcResponse::ok(serde_json::json!({
+                    "content": content,
+                })),
+                Err(e) => IpcResponse::err(
+                    "read_error",
+                    &format!("failed to read {}: {}", path, e),
+                    None,
+                ),
+            },
+            IpcRequest::Write {
+                ref path,
+                ref content,
+            } => match std::fs::write(path, content) {
+                Ok(()) => IpcResponse::ok(serde_json::json!({
+                    "bytes_written": content.len(),
+                })),
+                Err(e) => IpcResponse::err(
+                    "write_error",
+                    &format!("failed to write {}: {}", path, e),
+                    None,
+                ),
+            },
+        }
+    }
+}
+
+/// Production handler — backed by permission tree, judge, and session state.
+pub struct ProductionIpcHandler {
+    pub tree: Arc<crate::permission::PermissionTree>,
+    pub judge: Arc<crate::judge::JudgeClient>,
+    pub state: Arc<SessionState>,
+    pub audit: Arc<crate::audit::AuditLog>,
+}
+
+impl IpcHandler for ProductionIpcHandler {
+    fn handle(&self, request: IpcRequest) -> IpcResponse {
+        match request {
+            IpcRequest::Status => {
+                let rules: Vec<serde_json::Value> = self
+                    .tree
+                    .rules()
+                    .iter()
+                    .map(|r| {
+                        let effect = match r.effect {
+                            crate::permission::Effect::Permit => "permit",
+                            crate::permission::Effect::Forbid => "forbid",
+                        };
+                        serde_json::json!({
+                            "effect": effect,
+                            "pattern": r.action,
+                            "source": r.source,
+                        })
+                    })
+                    .collect();
+                IpcResponse::ok(serde_json::json!({ "rules": rules }))
+            }
+
+            IpcRequest::WhatCanI { ref pattern } => {
+                let matches: Vec<serde_json::Value> = self
+                    .tree
+                    .matching_rules(pattern)
+                    .iter()
+                    .map(|r| {
+                        let effect = match r.effect {
+                            crate::permission::Effect::Permit => "permit",
+                            crate::permission::Effect::Forbid => "forbid",
+                        };
+                        serde_json::json!({
+                            "effect": effect,
+                            "pattern": r.action,
+                        })
+                    })
+                    .collect();
+                IpcResponse::ok(serde_json::json!(matches))
+            }
+
+            IpcRequest::WhyDenied => match self.state.last_denial() {
+                Some(info) => IpcResponse::ok(serde_json::json!({
+                    "action": info.action,
+                    "reason": info.reason,
+                    "risk_tier": info.risk_tier,
+                    "hint": info.hint,
+                })),
+                None => IpcResponse::ok(serde_json::json!({
+                    "message": "no recent denials",
+                })),
+            },
+
+            IpcRequest::Allow { ref action } => {
+                // Consult judge for explicit permission request
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let risk_tier = crate::judge::classify_risk(action);
+                        let req = crate::judge::JudgeRequest {
+                            requested_action: action.clone(),
+                            current_tree: self
+                                .tree
+                                .rules()
+                                .iter()
+                                .map(|r| {
+                                    let effect = match r.effect {
+                                        crate::permission::Effect::Permit => "permit",
+                                        crate::permission::Effect::Forbid => "forbid",
+                                    };
+                                    format!("{} {}", effect, r.action)
+                                })
+                                .collect(),
+                            session_context: crate::judge::SessionContext {
+                                task: self.state.snapshot_task(),
+                            },
+                            history: self.state.snapshot_history(),
+                            risk_tier: risk_tier.to_string(),
+                            implicit: false,
+                        };
+
+                        let start = std::time::Instant::now();
+                        let decision = self.judge.evaluate_action(req).await;
+                        let latency_ms = start.elapsed().as_millis() as u64;
+
+                        let decision_str = match &decision {
+                            crate::judge::JudgeDecision::Approve => "approve",
+                            crate::judge::JudgeDecision::Deny { .. } => "deny",
+                            crate::judge::JudgeDecision::EscalateHuman => "escalate_human",
+                        };
+
+                        let _ = self.audit.log(crate::audit::AuditPayload::Judge {
+                            action: action.clone(),
+                            decision: decision_str.to_string(),
+                            risk_tier: risk_tier.to_string(),
+                            latency_ms,
+                            implicit: false,
+                        });
+
+                        decision
+                    })
+                });
+
+                match result {
+                    crate::judge::JudgeDecision::Approve => {
+                        self.tree.add_rule(crate::permission::Rule {
+                            id: format!("ask-{}", chrono::Utc::now().timestamp_millis()),
+                            effect: crate::permission::Effect::Permit,
+                            action: action.clone(),
+                            rule_type: Some(crate::permission::RuleType::Idempotent),
+                            approved_by: Some("judge".into()),
+                            source: Some("ask-allow".into()),
+                            plan_id: None,
+                            reason: None,
+                            expires: None,
+                        });
+                        self.state.record_decision(action, "allow", "judge");
+                        IpcResponse::ok(serde_json::json!({
+                            "granted": true,
+                            "pattern": action,
+                        }))
+                    }
+                    crate::judge::JudgeDecision::Deny { reason } => {
+                        self.state.record_denial(DenialInfo {
+                            action: action.clone(),
+                            reason: reason.clone(),
+                            risk_tier: crate::judge::classify_risk(action).to_string(),
+                            hint: "ask plan \"describe your goal\"".to_string(),
+                        });
+                        IpcResponse::ok(serde_json::json!({
+                            "granted": false,
+                            "reason": reason,
+                        }))
+                    }
+                    crate::judge::JudgeDecision::EscalateHuman => {
+                        IpcResponse::ok(serde_json::json!({
+                            "granted": false,
+                            "reason": "escalated to human approval",
+                        }))
+                    }
+                }
+            }
+
+            IpcRequest::Plan { ref description } => {
+                let result = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let req = crate::judge::PlanRequest {
+                            description: description.clone(),
+                            current_tree: self
+                                .tree
+                                .rules()
+                                .iter()
+                                .map(|r| format!("{:?} {}", r.effect, r.action))
+                                .collect(),
+                            session_context: crate::judge::SessionContext {
+                                task: self.state.snapshot_task(),
+                            },
+                            history: self.state.snapshot_history(),
+                        };
+                        self.judge.evaluate_plan(req).await
+                    })
+                });
+
+                match result {
+                    Ok(plan) => {
+                        let mut auto_approved = 0u32;
+                        let mut pending_human = 0u32;
+
+                        for rule in &plan.rules {
+                            let effect = match rule.effect.as_str() {
+                                "forbid" => crate::permission::Effect::Forbid,
+                                _ => crate::permission::Effect::Permit,
+                            };
+                            let rule_type = match rule.rule_type.as_str() {
+                                "one-shot" | "oneshot" => {
+                                    Some(crate::permission::RuleType::OneShot { consumed: false })
+                                }
+                                _ => Some(crate::permission::RuleType::Idempotent),
+                            };
+
+                            // Safe rules auto-approved, moderate/dangerous flagged
+                            if rule.risk_level == "safe" {
+                                self.tree.add_rule(crate::permission::Rule {
+                                    id: format!("{}:{}", plan.plan_id, auto_approved),
+                                    effect,
+                                    action: rule.action.clone(),
+                                    rule_type,
+                                    approved_by: Some("judge".into()),
+                                    source: Some(format!("plan:{}", plan.plan_id)),
+                                    plan_id: Some(plan.plan_id.clone()),
+                                    reason: None,
+                                    expires: None,
+                                });
+                                auto_approved += 1;
+                            } else {
+                                pending_human += 1;
+                            }
+                        }
+
+                        let _ = self.audit.log(crate::audit::AuditPayload::Plan {
+                            plan_id: plan.plan_id.clone(),
+                            description: description.clone(),
+                            auto_approved,
+                            pending_human,
+                        });
+
+                        IpcResponse::ok(serde_json::json!({
+                            "plan_id": plan.plan_id,
+                            "status": "processed",
+                            "auto_approved": auto_approved,
+                            "pending_human": pending_human,
+                        }))
+                    }
+                    Err(e) => IpcResponse::err(
+                        "plan_error",
+                        &format!("judge plan evaluation failed: {}", e),
+                        Some("try a simpler plan description"),
+                    ),
+                }
+            }
+
+            IpcRequest::Context { ref task } => {
+                let old_task = self.state.set_task(task.clone());
+                let _ = self.audit.log(crate::audit::AuditPayload::Context {
+                    old_task,
+                    new_task: task.clone(),
+                });
+                IpcResponse::ok(serde_json::json!({
+                    "task": task,
+                    "accepted": true,
+                }))
+            }
+
+            // File I/O — same as YOLO (direct filesystem)
             IpcRequest::Read { ref path } => match std::fs::read_to_string(path) {
                 Ok(content) => IpcResponse::ok(serde_json::json!({
                     "content": content,

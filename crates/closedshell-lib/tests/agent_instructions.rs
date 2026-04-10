@@ -412,13 +412,19 @@ fn load_agent_scenarios() -> Vec<AgentScenario> {
 
 #[tokio::test]
 async fn agent_instructions() {
-    let api_key = match std::env::var("ANTHROPIC_KEY") {
-        Ok(k) if !k.is_empty() => k,
-        _ => {
-            eprintln!("ANTHROPIC_KEY not set, skipping agent instruction tests");
-            return;
-        }
-    };
+    // Gate on RUN_AGENT_TESTS=1 — this test makes many real API calls and is expensive
+    if std::env::var("RUN_AGENT_TESTS").as_deref() != Ok("1") {
+        eprintln!("RUN_AGENT_TESTS=1 not set, skipping agent instruction tests");
+        return;
+    }
+    let api_key =
+        match std::env::var("ANTHROPIC_KEY").or_else(|_| std::env::var("ANTHROPIC_API_KEY")) {
+            Ok(k) if !k.is_empty() => k,
+            _ => {
+                eprintln!("ANTHROPIC_KEY not set, skipping agent instruction tests");
+                return;
+            }
+        };
 
     let client = TestClient::new(api_key);
     let variants = load_variants();

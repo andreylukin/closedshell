@@ -47,6 +47,9 @@ pub struct JudgeConfig {
     pub temperature: f32,
     #[serde(default)]
     pub system_prompt_path: Option<String>,
+    /// Custom agent instruction template. Default built-in instructions are used if absent.
+    #[serde(default)]
+    pub agent_instructions_path: Option<String>,
     /// Require TLS for the judge API endpoint.
     /// Default: true for non-localhost endpoints, false for localhost.
     /// When true, the judge client will refuse to connect over plain HTTP to
@@ -121,6 +124,7 @@ impl Default for JudgeConfig {
             system_prompt_path: None,
             require_tls: None,
             tls_ca_cert: None,
+            agent_instructions_path: None,
         }
     }
 }
@@ -157,7 +161,6 @@ pub fn resolve_tilde(path: &str) -> String {
 pub struct CliFlags {
     pub yolo: bool,
     pub no_motd: bool,
-    pub task: Option<String>,
     pub templates: Vec<String>,
 }
 
@@ -180,6 +183,9 @@ impl Config {
         self.sandbox.templates_dir = resolve_tilde(&self.sandbox.templates_dir);
         if let Some(ref path) = self.judge.system_prompt_path {
             self.judge.system_prompt_path = Some(resolve_tilde(path));
+        }
+        if let Some(ref path) = self.judge.agent_instructions_path {
+            self.judge.agent_instructions_path = Some(resolve_tilde(path));
         }
     }
 }
@@ -252,7 +258,7 @@ mod tests {
         let flags = CliFlags {
             yolo: true,
             no_motd: true,
-            task: None,
+
             templates: vec![],
         };
         config.merge_cli_flags(&flags);
@@ -270,7 +276,7 @@ mod tests {
         let flags = CliFlags {
             yolo: false,
             no_motd: false,
-            task: None,
+
             templates: vec![],
         };
         config.merge_cli_flags(&flags);

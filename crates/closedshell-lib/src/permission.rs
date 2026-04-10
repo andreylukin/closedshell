@@ -163,6 +163,18 @@ impl PermissionTree {
         Ok(())
     }
 
+    /// Returns true if any non-expired forbid rule matches the action.
+    /// Used by JudgeDecider to distinguish "forbidden" (hard deny) from "no permit" (consult judge).
+    pub fn has_forbid(&self, action_canonical: &str) -> bool {
+        let rules = self.rules.read().unwrap();
+        let now = Utc::now();
+        rules.iter().any(|r| {
+            r.effect == Effect::Forbid
+                && !is_expired(r, now)
+                && action_glob_match(&r.action, action_canonical)
+        })
+    }
+
     pub fn rules(&self) -> Vec<Rule> {
         self.rules.read().unwrap().clone()
     }

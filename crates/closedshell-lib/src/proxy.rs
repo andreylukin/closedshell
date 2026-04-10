@@ -5,7 +5,10 @@
 //! allows everything.
 
 use crate::audit::{AuditLog, AuditPayload, RequestMeta};
+use crate::ipc::{DenialInfo, SessionState};
+use crate::judge::{self, JudgeClient, JudgeDecision, JudgeRequest, SessionContext};
 use crate::parser::{self, Action, RequestInfo};
+use crate::permission::PermissionTree;
 use crate::tls::SessionCA;
 
 use std::collections::HashMap;
@@ -53,6 +56,156 @@ impl DecisionMaker for PatternDecider {
         }
         Verdict::Deny {
             reason: format!("no allow rule matched: {}", canonical),
+        }
+    }
+}
+
+/// Judge-backed decider: checks permission tree first, consults judge on miss.
+///
+/// Decision flow:
+/// 1. Tree permit hit → Allow (fast path)
+/// 2. Tree forbid hit → Deny (judge NOT consulted)
+/// 3. No match + implicit_ask → judge call via block_in_place
+/// 4. No match + !implicit_ask → Deny
+pub struct JudgeDecider {
+    pub tree: Arc<PermissionTree>,
+    pub judge: Arc<JudgeClient>,
+    pub state: Arc<SessionState>,
+    pub audit: Arc<AuditLog>,
+    pub implicit_ask: bool,
+}
+
+impl JudgeDecider {
+    /// Consult the judge for an action with no matching permit or forbid.
+    async fn consult_judge(&self, canonical: &str) -> Verdict {
+        let start = std::time::Instant::now();
+        let risk_tier = judge::classify_risk(canonical);
+
+        let req = JudgeRequest {
+            requested_action: canonical.to_string(),
+            current_tree: self
+                .tree
+                .rules()
+                .iter()
+                .map(|r| {
+                    let effect = match r.effect {
+                        crate::permission::Effect::Permit => "permit",
+                        crate::permission::Effect::Forbid => "forbid",
+                    };
+                    format!("{} {}", effect, r.action)
+                })
+                .collect(),
+            session_context: SessionContext {
+                task: self.state.snapshot_task(),
+            },
+            history: self.state.snapshot_history(),
+            risk_tier: risk_tier.to_string(),
+            implicit: true,
+        };
+
+        let decision = self.judge.evaluate_action(req).await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        let decision_str = match &decision {
+            JudgeDecision::Approve => "approve",
+            JudgeDecision::Deny { .. } => "deny",
+            JudgeDecision::EscalateHuman => "escalate_human",
+        };
+
+        let _ = self.audit.log(AuditPayload::Judge {
+            action: canonical.to_string(),
+            decision: decision_str.to_string(),
+            risk_tier: risk_tier.to_string(),
+            latency_ms,
+            implicit: true,
+        });
+
+        match decision {
+            JudgeDecision::Approve => {
+                // Add rule to tree so next time is fast path
+                self.tree.add_rule(crate::permission::Rule {
+                    id: format!("judge-{}", chrono::Utc::now().timestamp_millis()),
+                    effect: crate::permission::Effect::Permit,
+                    action: canonical.to_string(),
+                    rule_type: Some(crate::permission::RuleType::Idempotent),
+                    approved_by: Some("judge".into()),
+                    source: Some("implicit-ask".into()),
+                    plan_id: None,
+                    reason: None,
+                    expires: None,
+                });
+                self.state.record_decision(canonical, "allow", "judge");
+                Verdict::Allow
+            }
+            JudgeDecision::Deny { reason } => {
+                self.state.record_denial(DenialInfo {
+                    action: canonical.to_string(),
+                    reason: reason.clone(),
+                    risk_tier: risk_tier.to_string(),
+                    hint: format!("ask allow \"{}\"", canonical),
+                });
+                self.state.record_decision(canonical, "deny", "judge");
+                Verdict::Deny { reason }
+            }
+            JudgeDecision::EscalateHuman => {
+                let reason =
+                    "judge escalated to human — use `ask plan` to request approval".to_string();
+                self.state.record_denial(DenialInfo {
+                    action: canonical.to_string(),
+                    reason: reason.clone(),
+                    risk_tier: risk_tier.to_string(),
+                    hint: "ask plan \"describe your goal\"".to_string(),
+                });
+                self.state
+                    .record_decision(canonical, "deny", "judge-escalate");
+                Verdict::Deny { reason }
+            }
+        }
+    }
+}
+
+impl DecisionMaker for JudgeDecider {
+    fn evaluate(&self, action: &Action) -> Verdict {
+        let canonical = action.canonical();
+
+        // Check permission tree first
+        let tree_verdict = self.tree.evaluate(&canonical);
+
+        match tree_verdict {
+            crate::permission::TreeVerdict::Allow => {
+                self.state.record_decision(&canonical, "allow", "tree");
+                Verdict::Allow
+            }
+            crate::permission::TreeVerdict::Deny { reason } => {
+                // Explicit forbid → hard deny, judge NOT consulted
+                if self.tree.has_forbid(&canonical) {
+                    self.state.record_denial(DenialInfo {
+                        action: canonical.clone(),
+                        reason: reason.clone(),
+                        risk_tier: judge::classify_risk(&canonical).to_string(),
+                        hint: "this action is explicitly forbidden".to_string(),
+                    });
+                    self.state.record_decision(&canonical, "deny", "forbid");
+                    return Verdict::Deny { reason };
+                }
+
+                // No explicit forbid, just no matching permit
+                if !self.implicit_ask {
+                    self.state.record_denial(DenialInfo {
+                        action: canonical.clone(),
+                        reason: reason.clone(),
+                        risk_tier: judge::classify_risk(&canonical).to_string(),
+                        hint: format!("ask allow \"{}\"", canonical),
+                    });
+                    self.state.record_decision(&canonical, "deny", "default");
+                    return Verdict::Deny { reason };
+                }
+
+                // Consult the judge — block_in_place bridges sync trait to async judge
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(self.consult_judge(&canonical))
+                })
+            }
         }
     }
 }
@@ -256,7 +409,6 @@ async fn handle_client(
             path: clean_path.clone(),
             headers: headers.clone(),
             query_params,
-            body_peek: None,
         };
         let action = parser::parse_action(&req_info);
 
@@ -282,11 +434,19 @@ async fn handle_client(
             },
         });
 
-        // On deny: return 403 and continue keepalive loop
+        // On deny: return 403 JSON with X-ClosedShell-Denied header
         if let Verdict::Deny { reason } = &verdict {
-            let body = format!("closedshell: denied — {}\n", reason);
+            let risk_tier = judge::classify_risk(&action.canonical());
+            let deny_body = serde_json::json!({
+                "error": "denied",
+                "action": action.canonical(),
+                "reason": reason,
+                "risk_tier": risk_tier,
+                "hint": "ask plan \"describe your goal\""
+            });
+            let body = serde_json::to_string(&deny_body).unwrap_or_default();
             let response = format!(
-                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\n{}",
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-ClosedShell-Denied: true\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
                 body.len(),
                 body
             );

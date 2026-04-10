@@ -30,7 +30,6 @@ pub struct RequestInfo {
     pub path: String,
     pub headers: HashMap<String, String>,
     pub query_params: HashMap<String, String>,
-    pub body_peek: Option<String>,
 }
 
 /// Parse an HTTP request into a canonical action.
@@ -515,7 +514,6 @@ mod tests {
             path: path.into(),
             headers: HashMap::new(),
             query_params: HashMap::new(),
-            body_peek: None,
         }
     }
 

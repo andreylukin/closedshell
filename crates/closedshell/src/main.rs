@@ -1,8 +1,12 @@
 use clap::Parser;
 use closedshell_lib::audit::{AuditLog, AuditPayload};
 use closedshell_lib::config::{self, CliFlags};
+use closedshell_lib::ipc::{
+    IpcHandler, IpcServer, ProductionIpcHandler, SessionState, YoloIpcHandler,
+};
+use closedshell_lib::judge::JudgeClient;
 use closedshell_lib::permission::PermissionTree;
-use closedshell_lib::proxy::{MitmProxy, PatternDecider, YoloDecider};
+use closedshell_lib::proxy::{DecisionMaker, JudgeDecider, MitmProxy, PatternDecider, YoloDecider};
 use closedshell_lib::sandbox;
 use closedshell_lib::tls::SessionCA;
 use std::path::PathBuf;
@@ -12,13 +16,13 @@ use tokio::signal::unix::{SignalKind, signal};
 #[derive(Parser)]
 #[command(name = "closedshell", about = "Sandbox for AI agents")]
 struct Cli {
-    /// Session task description (used by judge for scope detection)
-    #[arg(long)]
-    task: Option<String>,
-
     /// Permission template to load (repeatable)
     #[arg(long)]
     template: Vec<String>,
+
+    /// Session task (skips interactive prompt, enables instruction injection)
+    #[arg(long)]
+    task: Option<String>,
 
     /// Log-only mode — no blocking
     #[arg(long)]
@@ -105,7 +109,7 @@ guard SecTrustSettingsSetTrustSettings(cert, .user, nil) == errSecSuccess else {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -125,7 +129,6 @@ async fn main() -> anyhow::Result<()> {
     let flags = CliFlags {
         yolo: cli.yolo,
         no_motd: cli.no_motd,
-        task: cli.task.clone(),
         templates: cli.template.clone(),
     };
     config.merge_cli_flags(&flags);
@@ -133,8 +136,26 @@ async fn main() -> anyhow::Result<()> {
     // 2. Generate session ID
     let session_id = generate_session_id();
 
+    // 2b. Resolve task: --task flag > interactive prompt (enforcing + TTY) > None
+    let task = if let Some(t) = cli.task.clone() {
+        Some(t)
+    } else if !config.sandbox.yolo && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        eprintln!("[closedshell] session {session_id}");
+        eprint!("[closedshell] Task: ");
+        let mut task = String::new();
+        std::io::stdin().read_line(&mut task)?;
+        let task = task.trim().to_string();
+        if task.is_empty() {
+            anyhow::bail!("task is required — describe what the agent should do");
+        }
+        eprintln!();
+        Some(task)
+    } else {
+        None
+    };
+
     // 3. Create tmpdir
-    let tmpdir = PathBuf::from(format!("/tmp/closedshell-{}", session_id));
+    let tmpdir = PathBuf::from(format!("/private/tmp/closedshell-{}", session_id));
     std::fs::create_dir_all(&tmpdir)?;
 
     // 4. Load persistent CA from ~/.closedshell/ (or create on first run)
@@ -175,39 +196,70 @@ async fn main() -> anyhow::Result<()> {
     // 5. Start MITM proxy
     let audit = Arc::new(AuditLog::open(&std::env::current_dir()?, &session_id)?);
 
-    // Build decider: --yolo > --template > --allow > default deny
-    let decider: Arc<dyn closedshell_lib::proxy::DecisionMaker> =
-        if config.sandbox.yolo && cli.template.is_empty() && cli.allow.is_empty() {
-            Arc::new(YoloDecider)
-        } else if !cli.template.is_empty() {
-            let tree = PermissionTree::new();
-            let templates_dir = config::resolve_tilde(&config.sandbox.templates_dir);
-            for name in &cli.template {
-                // Resolution order: exact path, path + .yaml, templates_dir/name.yaml
-                let raw = std::path::Path::new(name);
-                let path = if raw.exists() {
-                    PathBuf::from(name)
-                } else if raw.with_extension("yaml").exists() {
-                    raw.with_extension("yaml")
-                } else {
-                    let mut p = PathBuf::from(&templates_dir);
-                    p.push(format!("{}.yaml", name));
-                    p
-                };
-                let yaml = std::fs::read_to_string(&path).map_err(|e| {
-                    anyhow::anyhow!("failed to load template {}: {}", path.display(), e)
-                })?;
-                tree.load_template(&yaml)?;
-                tracing::info!(template = %path.display(), "loaded permission template");
+    // Build permission tree (shared across decider + IPC handler)
+    let tree = Arc::new(PermissionTree::new());
+
+    // Load templates into tree
+    if !cli.template.is_empty() {
+        let templates_dir = config::resolve_tilde(&config.sandbox.templates_dir);
+        for name in &cli.template {
+            let raw = std::path::Path::new(name);
+            let path = if raw.exists() {
+                PathBuf::from(name)
+            } else if raw.with_extension("yaml").exists() {
+                raw.with_extension("yaml")
+            } else {
+                let mut p = PathBuf::from(&templates_dir);
+                p.push(format!("{}.yaml", name));
+                p
+            };
+            let yaml = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!("failed to load template {}: {}", path.display(), e)
+            })?;
+            tree.load_template(&yaml)?;
+            tracing::info!(template = %path.display(), "loaded permission template");
+        }
+    }
+
+    // Build session state
+    let state = Arc::new(SessionState::new());
+    if let Some(ref t) = task {
+        state.set_task(t.clone());
+    }
+
+    // Build decider + IPC handler: yolo vs enforcing
+    let (decider, ipc_handler): (Arc<dyn DecisionMaker>, Arc<dyn IpcHandler>) =
+        if config.sandbox.yolo {
+            if !cli.allow.is_empty() {
+                (
+                    Arc::new(PatternDecider {
+                        allow_patterns: cli.allow.clone(),
+                    }),
+                    Arc::new(YoloIpcHandler) as Arc<dyn IpcHandler>,
+                )
+            } else {
+                (
+                    Arc::new(YoloDecider) as Arc<dyn DecisionMaker>,
+                    Arc::new(YoloIpcHandler) as Arc<dyn IpcHandler>,
+                )
             }
-            Arc::new(tree)
-        } else if !cli.allow.is_empty() {
-            Arc::new(PatternDecider {
-                allow_patterns: cli.allow.clone(),
-            })
         } else {
-            // No --yolo, no templates, no --allow: default deny everything
-            Arc::new(PermissionTree::new())
+            let judge = Arc::new(JudgeClient::new(config.judge.clone())?);
+            (
+                Arc::new(JudgeDecider {
+                    tree: tree.clone(),
+                    judge: judge.clone(),
+                    state: state.clone(),
+                    audit: audit.clone(),
+                    implicit_ask: config.sandbox.implicit_ask,
+                }) as Arc<dyn DecisionMaker>,
+                Arc::new(ProductionIpcHandler {
+                    tree: tree.clone(),
+                    judge,
+                    state: state.clone(),
+                    audit: audit.clone(),
+                }) as Arc<dyn IpcHandler>,
+            )
         };
 
     let proxy = MitmProxy {
@@ -242,6 +294,10 @@ async fn main() -> anyhow::Result<()> {
     let profile_path = tmpdir.join("profile.sb");
     std::fs::write(&profile_path, &profile)?;
 
+    // 6b. Start IPC server
+    let ipc_server = IpcServer::new(&ipc_socket_path, ipc_handler);
+    let ipc_handle = ipc_server.start()?;
+
     // 7. Print MOTD
     if config.sandbox.motd {
         let mode = if config.sandbox.yolo {
@@ -250,8 +306,8 @@ async fn main() -> anyhow::Result<()> {
             "enforcing"
         };
         eprintln!("[closedshell] session {} (new)", session_id);
-        if let Some(ref task) = cli.task {
-            eprintln!("[closedshell] task: {}", task);
+        if let Some(ref t) = task {
+            eprintln!("[closedshell] task: {}", t);
         }
         if !cli.template.is_empty() {
             eprintln!("[closedshell] templates: {}", cli.template.join(", "));
@@ -331,6 +387,7 @@ async fn main() -> anyhow::Result<()> {
     })?;
 
     proxy_handle.abort();
+    ipc_handle.abort();
 
     // Remove tmpdir (CA persists in ~/.closedshell/)
     let _ = std::fs::remove_dir_all(&tmpdir);

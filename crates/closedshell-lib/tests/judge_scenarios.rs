@@ -160,6 +160,10 @@ async fn run_scenario(client: &JudgeClient, scenario: &Scenario) -> ScenarioResu
 
 #[tokio::test]
 async fn judge_scenarios() {
+    if std::env::var("RUN_AGENT_TESTS").as_deref() != Ok("1") {
+        eprintln!("RUN_AGENT_TESTS=1 not set, skipping judge scenario tests");
+        return;
+    }
     let config = match anthropic_config() {
         Some(c) => c,
         None => {

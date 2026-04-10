@@ -68,17 +68,6 @@ fn no_motd_flag_suppresses_banner() {
 }
 
 #[test]
-fn task_flag_shows_in_motd() {
-    let (code, _, stderr) = run_closedshell(&["--yolo", "--task", "fix the bug", "echo", "ok"]);
-    assert_eq!(code, 0);
-    assert!(
-        stderr.contains("[closedshell] task: fix the bug"),
-        "task should appear in MOTD, got: {}",
-        stderr
-    );
-}
-
-#[test]
 fn audit_log_is_created() {
     let tmpdir = tempfile::tempdir().unwrap();
     let output = Command::new(closedshell_bin())

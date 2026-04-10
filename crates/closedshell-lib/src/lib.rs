@@ -1,3 +1,4 @@
+pub mod agent_instructions;
 pub mod audit;
 pub mod config;
 pub mod ipc;
