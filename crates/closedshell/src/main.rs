@@ -1,3 +1,5 @@
+mod tui;
+
 use clap::Parser;
 use closedshell_lib::audit::{AuditLog, AuditPayload};
 use closedshell_lib::config::{self, CliFlags};
@@ -40,8 +42,12 @@ struct Cli {
     #[arg(long)]
     allow: Vec<String>,
 
+    /// Open the TUI monitor for an existing session
+    #[arg(long, value_name = "SESSION_ID")]
+    tui: Option<String>,
+
     /// Command to run in sandbox (e.g., "pi", "claude-code")
-    #[arg(trailing_var_arg = true, required = true)]
+    #[arg(trailing_var_arg = true)]
     command: Vec<String>,
 }
 
@@ -116,6 +122,16 @@ async fn main() -> anyhow::Result<()> {
         .expect("Failed to install rustls crypto provider");
 
     let cli = Cli::parse();
+
+    // TUI mode: attach to an existing session
+    if let Some(ref session_id) = cli.tui {
+        return tui::run(session_id);
+    }
+
+    // Normal mode: command is required
+    if cli.command.is_empty() {
+        anyhow::bail!("command is required (e.g., closedshell -- claude)");
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(

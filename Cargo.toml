@@ -31,3 +31,5 @@ webpki-roots = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
 time = "0.3"
+ratatui = "0.29"
+crossterm = "0.28"
