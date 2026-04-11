@@ -11,6 +11,7 @@ use closedshell_lib::ipc::{
 use closedshell_lib::judge::JudgeClient;
 use closedshell_lib::permission::PermissionTree;
 use closedshell_lib::proxy::{DecisionMaker, JudgeDecider, MitmProxy, PatternDecider, YoloDecider};
+use closedshell_lib::pf;
 use closedshell_lib::sandbox;
 use closedshell_lib::tls::SessionCA;
 use std::path::PathBuf;
@@ -44,6 +45,14 @@ struct Cli {
     #[arg(long)]
     allow: Vec<String>,
 
+    /// Enable pf (packet filter) as secondary network enforcement layer (requires root)
+    #[arg(long)]
+    pf: bool,
+
+    /// One-time system setup for pf enforcement (creates sandbox user + pf anchor)
+    #[arg(long)]
+    pf_setup: bool,
+
     /// Open the TUI monitor for an existing session
     #[arg(long, value_name = "SESSION_ID")]
     tui: Option<String>,
@@ -51,6 +60,21 @@ struct Cli {
     /// Command to run in sandbox (e.g., "pi", "claude-code")
     #[arg(trailing_var_arg = true)]
     command: Vec<String>,
+}
+
+/// Shell-escape a string for use in `su -c "..."`.
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    // If the string contains no special chars, return as-is
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | ','))
+    {
+        return s.to_string();
+    }
+    // Wrap in single quotes, escaping existing single quotes
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 fn generate_session_id() -> String {
@@ -124,6 +148,14 @@ async fn main() -> anyhow::Result<()> {
         .expect("Failed to install rustls crypto provider");
 
     let cli = Cli::parse();
+
+    // pf setup mode: one-time system configuration (requires root)
+    if cli.pf_setup {
+        let pf_user = config::load_config()
+            .map(|c| c.sandbox.pf_user)
+            .unwrap_or_else(|_| pf::DEFAULT_PF_USER.to_string());
+        return pf::setup_system(&pf_user);
+    }
 
     // TUI mode: attach to an existing session
     if let Some(ref session_id) = cli.tui {
@@ -351,7 +383,44 @@ async fn main() -> anyhow::Result<()> {
     let profile_path = tmpdir.join("profile.sb");
     std::fs::write(&profile_path, &profile)?;
 
-    // 6b. Start IPC server
+    // 6b. pf enforcement (optional, requires --pf and root)
+    let pf_enabled = cli.pf || config.sandbox.pf;
+    let _pf_enforcer = if pf_enabled {
+        let pf_user = &config.sandbox.pf_user;
+        let sandbox_uid = pf::resolve_uid(pf_user)?;
+
+        if !pf::check_anchor_configured()? {
+            anyhow::bail!(
+                "pf anchor not configured — run `sudo closedshell --pf-setup` first"
+            );
+        }
+
+        let enforcer = pf::PfEnforcer::new(&session_id, actual_port, sandbox_uid, &tmpdir)?;
+        enforcer.load()?;
+
+        // Make tmpdir and its contents accessible to the sandbox user
+        let uid_str = sandbox_uid.to_string();
+        let status = std::process::Command::new("chown")
+            .args(["-R", &format!("{}:staff", pf_user)])
+            .arg(&tmpdir)
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("failed to chown tmpdir for sandbox user");
+        }
+
+        // Also grant read access to the IPC socket path (will be created by IPC server)
+        // The socket directory must be accessible
+        let _ = std::process::Command::new("chmod")
+            .args(["755", &tmpdir.to_string_lossy()])
+            .status();
+
+        eprintln!("[closedshell] pf enforcement active (user: {}, uid: {})", pf_user, uid_str);
+        Some((enforcer, sandbox_uid))
+    } else {
+        None
+    };
+
+    // 6c. Start IPC server
     let ipc_server = IpcServer::new(&ipc_socket_path, ipc_handler);
     let ipc_handle = ipc_server.start()?;
 
@@ -406,26 +475,57 @@ async fn main() -> anyhow::Result<()> {
     // 9. Build and exec sandbox-exec with environment
     let proxy_url = format!("http://localhost:{}", actual_port);
 
-    let mut cmd = tokio::process::Command::new("sandbox-exec");
-    cmd.arg("-f")
-        .arg(&profile_path)
-        .arg("env")
-        .arg(format!("HTTPS_PROXY={}", proxy_url))
-        .arg(format!("HTTP_PROXY={}", proxy_url))
-        .arg(format!("SSL_CERT_FILE={}", ca_pem_path.display()))
-        .arg(format!("SSL_CERT_DIR={}", tmpdir.display()))
-        .arg("GODEBUG=x509usefallbackroots=1")
-        .arg(format!("CLOSEDSHELL_SOCKET={}/ask.sock", tmpdir.display()))
-        .arg(format!("CLOSEDSHELL_SESSION={}", session_id));
-
-    // Pass through configured env vars
+    // Build the env + command args that go inside sandbox-exec
+    let mut env_args: Vec<String> = vec![
+        format!("HTTPS_PROXY={}", proxy_url),
+        format!("HTTP_PROXY={}", proxy_url),
+        format!("SSL_CERT_FILE={}", ca_pem_path.display()),
+        format!("SSL_CERT_DIR={}", tmpdir.display()),
+        "GODEBUG=x509usefallbackroots=1".to_string(),
+        format!("CLOSEDSHELL_SOCKET={}/ask.sock", tmpdir.display()),
+        format!("CLOSEDSHELL_SESSION={}", session_id),
+    ];
     for var in &config.sandbox.passthrough_env {
         if let Ok(val) = std::env::var(var) {
-            cmd.arg(format!("{}={}", var, val));
+            env_args.push(format!("{}={}", var, val));
         }
     }
 
-    cmd.args(&cli.command);
+    let mut cmd = if let Some((_, _sandbox_uid)) = &_pf_enforcer {
+        // pf mode: run sandbox-exec as the dedicated sandbox user via `su`
+        // Build the full command string for su -c
+        let mut inner_parts: Vec<String> = vec![
+            "sandbox-exec".into(),
+            "-f".into(),
+            profile_path.to_string_lossy().to_string(),
+            "env".into(),
+        ];
+        inner_parts.extend(env_args);
+        inner_parts.extend(cli.command.iter().cloned());
+
+        // Shell-escape each part for su -c
+        let inner_cmd = inner_parts
+            .iter()
+            .map(|s| shell_escape(s))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let mut c = tokio::process::Command::new("su");
+        c.arg("-m") // preserve environment
+            .arg(&config.sandbox.pf_user)
+            .arg("-c")
+            .arg(&inner_cmd);
+        c
+    } else {
+        // Standard mode: direct sandbox-exec
+        let mut c = tokio::process::Command::new("sandbox-exec");
+        c.arg("-f").arg(&profile_path).arg("env");
+        for arg in &env_args {
+            c.arg(arg);
+        }
+        c.args(&cli.command);
+        c
+    };
 
     tracing::info!(
         session = %session_id,

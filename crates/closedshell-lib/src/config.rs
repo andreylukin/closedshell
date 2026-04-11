@@ -28,6 +28,13 @@ pub struct SandboxConfig {
     pub passthrough_env: Vec<String>,
     #[serde(default = "default_templates_dir")]
     pub templates_dir: String,
+    /// Enable pf (packet filter) as secondary network enforcement layer.
+    /// Requires one-time `--pf-setup` (root). Scopes rules by sandbox user UID.
+    #[serde(default)]
+    pub pf: bool,
+    /// System user for pf-scoped sandboxing. Default: "_closedshell".
+    #[serde(default = "default_pf_user")]
+    pub pf_user: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +106,9 @@ fn default_timeout() -> u64 {
 fn default_moderate_timeout() -> Option<String> {
     Some("30s".into())
 }
+fn default_pf_user() -> String {
+    "_closedshell".to_string()
+}
 
 impl Default for SandboxConfig {
     fn default() -> Self {
@@ -108,6 +118,8 @@ impl Default for SandboxConfig {
             yolo: false,
             passthrough_env: vec![],
             templates_dir: default_templates_dir(),
+            pf: false,
+            pf_user: default_pf_user(),
         }
     }
 }
