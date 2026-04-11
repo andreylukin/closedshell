@@ -221,10 +221,7 @@ fn create_system_user(username: &str) -> anyhow::Result<()> {
     let user_path = format!("/Users/{}", username);
 
     let steps: &[(&[&str], &str)] = &[
-        (
-            &[".", "-create", &user_path],
-            "create user record",
-        ),
+        (&[".", "-create", &user_path], "create user record"),
         (
             &[".", "-create", &user_path, "UserShell", "/usr/bin/false"],
             "set shell",
@@ -238,7 +235,13 @@ fn create_system_user(username: &str) -> anyhow::Result<()> {
             "set GID",
         ),
         (
-            &[".", "-create", &user_path, "RealName", "ClosedShell Sandbox"],
+            &[
+                ".",
+                "-create",
+                &user_path,
+                "RealName",
+                "ClosedShell Sandbox",
+            ],
             "set real name",
         ),
         (
@@ -327,10 +330,26 @@ mod tests {
     #[test]
     fn test_generate_rules_format() {
         let rules = generate_rules(8443, 350, "en0");
-        assert!(rules.contains("pass out quick on en0 proto tcp from any to 127.0.0.1 port 8443 user 350"));
-        assert!(rules.contains("pass out quick on lo0 proto tcp from any to 127.0.0.1 port 8443 user 350"));
-        assert!(rules.contains("block return out quick on en0 proto tcp from any to any port 80 user 350"));
-        assert!(rules.contains("block return out quick on en0 proto tcp from any to any port 443 user 350"));
+        assert!(
+            rules.contains(
+                "pass out quick on en0 proto tcp from any to 127.0.0.1 port 8443 user 350"
+            )
+        );
+        assert!(
+            rules.contains(
+                "pass out quick on lo0 proto tcp from any to 127.0.0.1 port 8443 user 350"
+            )
+        );
+        assert!(
+            rules.contains(
+                "block return out quick on en0 proto tcp from any to any port 80 user 350"
+            )
+        );
+        assert!(
+            rules.contains(
+                "block return out quick on en0 proto tcp from any to any port 443 user 350"
+            )
+        );
     }
 
     #[test]
