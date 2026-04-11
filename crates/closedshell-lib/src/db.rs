@@ -303,6 +303,36 @@ impl SessionDb {
         Ok(rows)
     }
 
+    /// Find a session by its ID.
+    pub fn find_session_by_id(&self, id: &str) -> Result<Option<SessionRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, workdir, command, task, status, templates, pid, port, log_path,
+                    created_at, last_used, total_decisions, total_denied
+             FROM sessions WHERE id = ?1",
+        )?;
+        let row = stmt
+            .query_row(params![id], |row| {
+                Ok(SessionRow {
+                    id: row.get(0)?,
+                    workdir: row.get(1)?,
+                    command: row.get(2)?,
+                    task: row.get(3)?,
+                    status: row.get(4)?,
+                    templates: row.get(5)?,
+                    pid: row.get(6)?,
+                    port: row.get(7)?,
+                    log_path: row.get(8)?,
+                    created_at: row.get(9)?,
+                    last_used: row.get(10)?,
+                    total_decisions: row.get::<_, i64>(11)? as u64,
+                    total_denied: row.get::<_, i64>(12)? as u64,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
     /// Mark a session as crashed.
     pub fn mark_crashed(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
