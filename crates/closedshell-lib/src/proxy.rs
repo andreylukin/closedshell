@@ -31,6 +31,10 @@ pub enum Verdict {
 /// Decides whether an intercepted action should be forwarded or blocked.
 pub trait DecisionMaker: Send + Sync + 'static {
     fn evaluate(&self, action: &Action) -> Verdict;
+    /// Retrieve the last denial info, if tracked by this decider.
+    fn last_denial(&self) -> Option<DenialInfo> {
+        None
+    }
 }
 
 /// YOLO mode: always allow.
@@ -145,6 +149,7 @@ impl JudgeDecider {
                     reason: reason.clone(),
                     risk_tier: risk_tier.to_string(),
                     hint: format!("ask allow \"{}\"", canonical),
+                    denied_by: "judge".to_string(),
                 });
                 self.state.record_decision(canonical, "deny", "judge");
                 Verdict::Deny { reason }
@@ -183,6 +188,7 @@ impl JudgeDecider {
                                 reason: reason.clone(),
                                 risk_tier: risk_tier.to_string(),
                                 hint: "human denied this action".to_string(),
+                                denied_by: "human".to_string(),
                             });
                             self.state.record_decision(canonical, "deny", "human");
                             Verdict::Deny { reason }
@@ -195,6 +201,7 @@ impl JudgeDecider {
                                 reason: reason.clone(),
                                 risk_tier: risk_tier.to_string(),
                                 hint: "ask plan \"describe your goal\"".to_string(),
+                                denied_by: "timeout".to_string(),
                             });
                             self.state
                                 .record_decision(canonical, "deny", "approval-timeout");
@@ -210,6 +217,7 @@ impl JudgeDecider {
                         reason: reason.clone(),
                         risk_tier: risk_tier.to_string(),
                         hint: "ask plan \"describe your goal\"".to_string(),
+                        denied_by: "judge-escalate".to_string(),
                     });
                     self.state
                         .record_decision(canonical, "deny", "judge-escalate");
@@ -221,6 +229,10 @@ impl JudgeDecider {
 }
 
 impl DecisionMaker for JudgeDecider {
+    fn last_denial(&self) -> Option<DenialInfo> {
+        self.state.last_denial()
+    }
+
     fn evaluate(&self, action: &Action) -> Verdict {
         let canonical = action.canonical();
 
@@ -240,6 +252,7 @@ impl DecisionMaker for JudgeDecider {
                         reason: reason.clone(),
                         risk_tier: judge::classify_risk(&canonical).to_string(),
                         hint: "this action is explicitly forbidden".to_string(),
+                        denied_by: "forbid".to_string(),
                     });
                     self.state.record_decision(&canonical, "deny", "forbid");
                     return Verdict::Deny { reason };
@@ -252,6 +265,7 @@ impl DecisionMaker for JudgeDecider {
                         reason: reason.clone(),
                         risk_tier: judge::classify_risk(&canonical).to_string(),
                         hint: format!("ask allow \"{}\"", canonical),
+                        denied_by: "default".to_string(),
                     });
                     self.state.record_decision(&canonical, "deny", "default");
                     return Verdict::Deny { reason };
@@ -490,19 +504,48 @@ async fn handle_client(
             },
         });
 
-        // On deny: return 403 JSON with X-ClosedShell-Denied header
+        // On deny: return structured 403 with denial details in body and headers.
+        // Agents can parse the JSON body, read the headers, or just log the message field.
         if let Verdict::Deny { reason } = &verdict {
-            let risk_tier = judge::classify_risk(&action.canonical());
+            let canonical = action.canonical();
+
+            // Pull denial info from decider state (JudgeDecider tracks it),
+            // fall back to constructing it from the verdict.
+            let denial = decider.last_denial().unwrap_or_else(|| DenialInfo {
+                action: canonical.clone(),
+                reason: reason.clone(),
+                risk_tier: judge::classify_risk(&canonical).to_string(),
+                hint: format!("ask allow \"{}\"", canonical),
+                denied_by: "decider".to_string(),
+            });
+
+            let message = format!(
+                "[ClosedShell] Denied {} — {}. Run: {}",
+                denial.action, denial.reason, denial.hint
+            );
             let deny_body = serde_json::json!({
-                "error": "denied",
-                "action": action.canonical(),
-                "reason": reason,
-                "risk_tier": risk_tier,
-                "hint": "ask plan \"describe your goal\""
+                "error": "denied_by_closedshell",
+                "action": denial.action,
+                "reason": denial.reason,
+                "risk_tier": denial.risk_tier,
+                "denied_by": denial.denied_by,
+                "hint": denial.hint,
+                "recovery": format!("ask why-denied && {}", denial.hint),
+                "message": message,
             });
             let body = serde_json::to_string(&deny_body).unwrap_or_default();
             let response = format!(
-                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nX-ClosedShell-Denied: true\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                "HTTP/1.1 403 Forbidden\r\n\
+                 Content-Type: application/json\r\n\
+                 X-ClosedShell-Denied: true\r\n\
+                 X-ClosedShell-Action: {}\r\n\
+                 X-ClosedShell-Reason: {}\r\n\
+                 X-ClosedShell-Hint: {}\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: keep-alive\r\n\r\n{}",
+                denial.action,
+                denial.reason,
+                denial.hint,
                 body.len(),
                 body
             );

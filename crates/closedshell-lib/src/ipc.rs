@@ -12,13 +12,15 @@ use crate::judge::HistoryEntry;
 
 const MAX_HISTORY: usize = 20;
 
-/// Last denial info, returned by `ask why-denied`.
+/// Last denial info, returned by `ask why-denied` and used to build 403 responses.
 #[derive(Debug, Clone)]
 pub struct DenialInfo {
     pub action: String,
     pub reason: String,
     pub risk_tier: String,
     pub hint: String,
+    /// What denied this: "tree", "forbid", "judge", "human", "default", "timeout"
+    pub denied_by: String,
 }
 
 /// Shared mutable session state.
@@ -333,6 +335,7 @@ impl IpcHandler for ProductionIpcHandler {
                     "reason": info.reason,
                     "risk_tier": info.risk_tier,
                     "hint": info.hint,
+                    "denied_by": info.denied_by,
                 })),
                 None => IpcResponse::ok(serde_json::json!({
                     "message": "no recent denials",
@@ -413,6 +416,7 @@ impl IpcHandler for ProductionIpcHandler {
                             reason: reason.clone(),
                             risk_tier: crate::judge::classify_risk(action).to_string(),
                             hint: "ask plan \"describe your goal\"".to_string(),
+                            denied_by: "judge".to_string(),
                         });
                         IpcResponse::ok(serde_json::json!({
                             "granted": false,
@@ -678,6 +682,7 @@ impl ProductionIpcHandler {
                         reason: reason.clone(),
                         risk_tier: "safe".into(),
                         hint: "this file action is explicitly forbidden".into(),
+                        denied_by: "forbid".to_string(),
                     });
                     self.state.record_decision(canonical, "deny", "forbid");
                     return Err(reason);
@@ -735,6 +740,7 @@ impl ProductionIpcHandler {
                             reason: reason.clone(),
                             risk_tier: "safe".into(),
                             hint: format!("ask allow \"{}\"", canonical),
+                            denied_by: "judge".to_string(),
                         });
                         self.state.record_decision(canonical, "deny", "judge");
                         Err(reason)
@@ -746,6 +752,7 @@ impl ProductionIpcHandler {
                             reason: reason.clone(),
                             risk_tier: "moderate".into(),
                             hint: "ask plan \"describe your goal\"".into(),
+                            denied_by: "judge-escalate".to_string(),
                         });
                         Err(reason)
                     }
