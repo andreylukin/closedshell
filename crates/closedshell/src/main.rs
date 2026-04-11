@@ -10,11 +10,12 @@ use closedshell_lib::ipc::{
 };
 use closedshell_lib::judge::JudgeClient;
 use closedshell_lib::permission::PermissionTree;
-use closedshell_lib::proxy::{DecisionMaker, JudgeDecider, MitmProxy, PatternDecider, YoloDecider};
 use closedshell_lib::pf;
+use closedshell_lib::proxy::{DecisionMaker, JudgeDecider, MitmProxy, PatternDecider, YoloDecider};
 use closedshell_lib::sandbox;
+use closedshell_lib::template;
 use closedshell_lib::tls::SessionCA;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -86,6 +87,112 @@ fn generate_session_id() -> String {
     format!("{:08x}", (t & 0xFFFF_FFFF) as u32)
 }
 
+fn handle_template_command(args: &[String], templates_dir: &Path) -> anyhow::Result<()> {
+    match args.first().map(|s| s.as_str()) {
+        Some("init") => {
+            let provider = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!("usage: cs template init <provider>\n\nScaffold a new template for the given provider.")
+            })?;
+            let path = template::init(templates_dir, provider)?;
+            eprintln!("[closedshell] created template: {}", path.display());
+            Ok(())
+        }
+        Some("list") => {
+            let templates = template::list(templates_dir)?;
+            if templates.is_empty() {
+                eprintln!(
+                    "[closedshell] no templates found in {}",
+                    templates_dir.display()
+                );
+                eprintln!("[closedshell] use 'cs template init <provider>' to create one");
+                return Ok(());
+            }
+            // Print header
+            println!("{:<25} {:<45} {:>5}  PATH", "NAME", "DESCRIPTION", "RULES");
+            println!("{}", "-".repeat(100));
+            for t in &templates {
+                let desc = if t.description.len() > 43 {
+                    format!("{}...", &t.description[..40])
+                } else {
+                    t.description.clone()
+                };
+                println!(
+                    "{:<25} {:<45} {:>5}  {}",
+                    t.name,
+                    desc,
+                    t.rule_count,
+                    t.path.display()
+                );
+            }
+            Ok(())
+        }
+        Some("generate") => {
+            let session_id = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!("usage: cs template generate <session-id> [--name <name>]\n\nGenerate a template from a YOLO session's audit log.")
+            })?;
+
+            // Parse optional --name flag
+            let name = args
+                .iter()
+                .position(|a| a == "--name")
+                .and_then(|i| args.get(i + 1).map(|s| s.as_str()));
+
+            // Find session log path via DB
+            let db_path = if let Ok(p) = std::env::var("CLOSEDSHELL_DB") {
+                PathBuf::from(p)
+            } else {
+                let home = PathBuf::from(std::env::var("HOME").unwrap());
+                home.join(".closedshell").join("sessions.db")
+            };
+
+            let log_path = if db_path.exists() {
+                let db = SessionDb::open(&db_path)?;
+                match db.find_session_by_id(session_id)? {
+                    Some(session) => PathBuf::from(session.log_path),
+                    None => {
+                        // Fallback: look for log in current directory
+                        let fallback = PathBuf::from(format!("closedshell-{}.log", session_id));
+                        if fallback.exists() {
+                            fallback
+                        } else {
+                            anyhow::bail!(
+                                "session '{}' not found in database and no log file at {}",
+                                session_id,
+                                fallback.display()
+                            );
+                        }
+                    }
+                }
+            } else {
+                let fallback = PathBuf::from(format!("closedshell-{}.log", session_id));
+                if fallback.exists() {
+                    fallback
+                } else {
+                    anyhow::bail!(
+                        "no session database found and no log file at {}",
+                        fallback.display()
+                    );
+                }
+            };
+
+            let yaml = template::generate(&log_path, name)?;
+            print!("{}", yaml);
+            Ok(())
+        }
+        Some(other) => {
+            anyhow::bail!(
+                "unknown template command: '{}'\n\nusage: cs template <init|list|generate>",
+                other
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "usage: cs template <init|list|generate>\n\n  init <provider>              Scaffold a new template\n  list                         Show available templates\n  generate <session-id>        Generate template from YOLO session log"
+            );
+        }
+    }
+}
+
 /// Add a CA certificate to the macOS user trust store without a password prompt.
 ///
 /// The `security add-trusted-cert` CLI always prompts for a password on modern
@@ -155,6 +262,13 @@ async fn main() -> anyhow::Result<()> {
             .map(|c| c.sandbox.pf_user)
             .unwrap_or_else(|_| pf::DEFAULT_PF_USER.to_string());
         return pf::setup_system(&pf_user);
+    }
+
+    // Template subcommand: dispatch before proxy startup
+    if cli.command.first().map(|s| s.as_str()) == Some("template") {
+        let config = config::load_config()?;
+        let templates_dir = PathBuf::from(config::resolve_tilde(&config.sandbox.templates_dir));
+        return handle_template_command(&cli.command[1..], &templates_dir);
     }
 
     // TUI mode: attach to an existing session
@@ -390,9 +504,7 @@ async fn main() -> anyhow::Result<()> {
         let sandbox_uid = pf::resolve_uid(pf_user)?;
 
         if !pf::check_anchor_configured()? {
-            anyhow::bail!(
-                "pf anchor not configured — run `sudo closedshell --pf-setup` first"
-            );
+            anyhow::bail!("pf anchor not configured — run `sudo closedshell --pf-setup` first");
         }
 
         let enforcer = pf::PfEnforcer::new(&session_id, actual_port, sandbox_uid, &tmpdir)?;
@@ -414,7 +526,10 @@ async fn main() -> anyhow::Result<()> {
             .args(["755", &tmpdir.to_string_lossy()])
             .status();
 
-        eprintln!("[closedshell] pf enforcement active (user: {}, uid: {})", pf_user, uid_str);
+        eprintln!(
+            "[closedshell] pf enforcement active (user: {}, uid: {})",
+            pf_user, uid_str
+        );
         Some((enforcer, sandbox_uid))
     } else {
         None
