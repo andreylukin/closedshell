@@ -3,7 +3,7 @@
 ## Getting Started
 
 ```bash
-git clone https://github.com/nichochar/closedshell.git
+git clone https://github.com/andreylukin/closedshell.git
 cd closedshell
 make build    # dev build
 make check    # fmt + lint + test (what CI runs)

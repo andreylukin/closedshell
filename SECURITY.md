@@ -10,7 +10,7 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Instead, please report via [GitHub Security Advisories](https://github.com/nichochar/closedshell/security/advisories/new).
+Instead, please report via [GitHub Security Advisories](https://github.com/andreylukin/closedshell/security/advisories/new).
 
 ### What qualifies as a security issue
 
