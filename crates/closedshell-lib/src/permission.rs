@@ -265,7 +265,7 @@ fn promote_stars(pattern: &str) -> String {
 #[derive(Deserialize)]
 struct Template {
     name: String,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // present in YAML schema, consumed by serde
     description: Option<String>,
     rules: Vec<TemplateRule>,
 }
@@ -529,7 +529,7 @@ rules:
         ));
 
         assert_eq!(
-            tree.evaluate("file:read:/Users/andrey/.ssh/id_rsa"),
+            tree.evaluate("file:read:/Users/alice/.ssh/id_rsa"),
             TreeVerdict::Deny {
                 reason: "ssh key access denied".to_string()
             }
@@ -542,12 +542,12 @@ rules:
         let tree = PermissionTree::new();
         tree.add_rule(permit(
             "p1",
-            "file:write:/Users/andrey/repos/*",
+            "file:write:/Users/alice/repos/*",
             RuleType::Idempotent,
         ));
 
         assert_eq!(
-            tree.evaluate("file:write:/Users/andrey/repos/foo.txt"),
+            tree.evaluate("file:write:/Users/alice/repos/foo.txt"),
             TreeVerdict::Allow
         );
     }
@@ -558,7 +558,7 @@ rules:
         let tree = PermissionTree::new();
         tree.add_rule(permit(
             "p1",
-            "file:write:/Users/andrey/repos/*",
+            "file:write:/Users/alice/repos/*",
             RuleType::Idempotent,
         ));
 

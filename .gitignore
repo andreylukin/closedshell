@@ -5,3 +5,4 @@ closedshell-*.log
 .env
 .env.*
 .env.local
+.claude/

@@ -1,5 +1,9 @@
 # ClosedShell
 
+[![CI](https://github.com/andreylukin/closedshell/actions/workflows/ci.yml/badge.svg)](https://github.com/andreylukin/closedshell/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+
 **Control the network. Let the agent roam free.**
 
 A macOS sandbox for AI coding agents. Instead of restricting what tools an agent can use, ClosedShell controls what leaves your machine — every outbound HTTPS request is intercepted, parsed, and checked before it hits the wire.

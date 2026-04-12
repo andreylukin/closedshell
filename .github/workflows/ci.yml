@@ -20,8 +20,8 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-      - name: Clippy (lib)
-        run: cargo clippy -p closedshell-lib -- -D warnings
+      - name: Clippy
+        run: cargo clippy --all -- -D warnings
 
       - name: Test (lib)
         run: cargo test -p closedshell-lib

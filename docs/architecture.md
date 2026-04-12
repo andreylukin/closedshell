@@ -380,8 +380,8 @@ Unix socket, newline-delimited JSON. One request, one response. No streaming, no
 {"type": "allow", "action": "aws[profile=dev]:ec2:DescribeInstances"}
 {"type": "plan", "description": "rollback ECS deployment in us-east-1"}
 {"type": "context", "task": "now rolling back ECS deployment"}
-{"type": "read", "path": "/Users/andrey/repos/myproject/src/main.rs"}
-{"type": "write", "path": "/Users/andrey/repos/myproject/out.json", "content": "..."}
+{"type": "read", "path": "/Users/alice/repos/myproject/src/main.rs"}
+{"type": "write", "path": "/Users/alice/repos/myproject/out.json", "content": "..."}
 ```
 
 ### Response
@@ -527,7 +527,7 @@ Every proxy decision and `ask` CLI interaction produces a log entry. Common enve
   "session": "8f3a-29c1",
   "event": "file_io",
   "op": "write",
-  "path": "/Users/andrey/repos/myproject/out.json",
+  "path": "/Users/alice/repos/myproject/out.json",
   "result": "allow",
   "bytes": 1024,
   "decided_by": "p-003"
@@ -644,20 +644,20 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | T9 | Glob `aws[profile=dev]:s3:List*` does NOT match `aws[profile=prod]:s3:ListBuckets` | No match |
 | T10 | Template merge: two templates loaded, forbid from first cannot be removed by second | Forbid persists |
 | T11 | Plan revocation: revoke plan-id removes all rules with that plan_id | All child rules gone |
-| T12 | Forbid `file:read:/Users/*/.ssh/*`, evaluate `file:read:/Users/andrey/.ssh/id_rsa` | DENY |
-| T13 | Permit `file:write:/Users/andrey/repos/*`, evaluate `file:write:/Users/andrey/repos/foo.txt` | ALLOW |
+| T12 | Forbid `file:read:/Users/*/.ssh/*`, evaluate `file:read:/Users/alice/.ssh/id_rsa` | DENY |
+| T13 | Permit `file:write:/Users/alice/repos/*`, evaluate `file:write:/Users/alice/repos/foo.txt` | ALLOW |
 | T14 | No permit for `file:write:/etc/passwd`, evaluate | DENY (default deny) |
 
 ### File I/O
 
 | # | Test | Pass condition |
 |---|------|---------------|
-| F1 | Agent runs `ask write /Users/andrey/repos/test.txt "hello"` with matching permit | Daemon writes file on host side, agent gets confirmation |
-| F2 | Agent runs `ask write /Users/andrey/.ssh/config "..."` with forbid on dotfiles | DENY, file not written |
-| F3 | Agent runs `echo hi > /Users/andrey/repos/test.txt` directly (no `ask`) | Succeeds — file-write restrictions deferred to future phase |
-| F4 | Agent runs `cat /Users/andrey/repos/test.txt` directly | Succeeds — Seatbelt allows reads |
-| F5 | Agent runs `ask read /Users/andrey/.ssh/id_rsa` with forbid on `.ssh/*` | DENY, content not returned |
-| F6 | Agent runs `cat /Users/andrey/.ssh/id_rsa` directly | Succeeds (Seatbelt allows reads) — this is the audit gap we accept |
+| F1 | Agent runs `ask write /Users/alice/repos/test.txt "hello"` with matching permit | Daemon writes file on host side, agent gets confirmation |
+| F2 | Agent runs `ask write /Users/alice/.ssh/config "..."` with forbid on dotfiles | DENY, file not written |
+| F3 | Agent runs `echo hi > /Users/alice/repos/test.txt` directly (no `ask`) | Succeeds — file-write restrictions deferred to future phase |
+| F4 | Agent runs `cat /Users/alice/repos/test.txt` directly | Succeeds — Seatbelt allows reads |
+| F5 | Agent runs `ask read /Users/alice/.ssh/id_rsa` with forbid on `.ssh/*` | DENY, content not returned |
+| F6 | Agent runs `cat /Users/alice/.ssh/id_rsa` directly | Succeeds (Seatbelt allows reads) — this is the audit gap we accept |
 
 ### End-to-End (requires all sections)
 

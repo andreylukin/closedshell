@@ -1,6 +1,6 @@
 //! Audit logger: NDJSON file writer.
 //!
-//! One line per event. File: $PWD/closedshell-<session-id>.log
+//! One line per event. File: `$PWD/closedshell-<session-id>.log`
 
 use chrono::Utc;
 use serde::Serialize;

@@ -21,7 +21,7 @@ fn regex_escape(path: &str) -> String {
 /// Network is the real enforcement layer — all outbound goes through the MITM proxy.
 /// File denies prevent persistence attacks (shell rc injection) and credential theft.
 ///
-/// `home`: user's home directory (e.g. /Users/andrey).
+/// `home`: user's home directory (e.g. /Users/alice).
 /// `ipc_socket_path`: absolute path to the IPC socket (e.g. /tmp/closedshell-XXXX/ask.sock).
 /// `ca_key_path`: absolute path to the CA private key to deny agent access.
 pub fn generate_seatbelt_profile(

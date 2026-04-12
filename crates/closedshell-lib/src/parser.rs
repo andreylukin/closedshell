@@ -1,6 +1,6 @@
 //! Provider parsers: HTTP request → canonical action string.
 //!
-//! Format: provider[qualifier]:service:operation
+//! Format: `provider[qualifier]:service:operation`
 //! Generic fallback: net:METHOD:host/path
 
 use std::collections::HashMap;

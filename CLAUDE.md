@@ -41,7 +41,7 @@ crates/
   closedshell-lib/   # shared library (config, parsers, proxy, audit, tls, sandbox)
   closedshell/       # host binary (CLI + daemon)
   ask/               # in-sandbox binary
-docs/                # spec (DO NOT MODIFY — treat as requirements)
+docs/                # architecture spec and design docs
 ```
 
 ## Usage

@@ -160,8 +160,8 @@ net:POST:hooks.slack.com/services/T00/B00/xxx
 File access through `ask read` / `ask write` uses the `file` provider:
 
 ```
-file:read:/Users/andrey/repos/myproject/src/main.rs
-file:write:/Users/andrey/repos/myproject/output.json
+file:read:/Users/alice/repos/myproject/src/main.rs
+file:write:/Users/alice/repos/myproject/output.json
 file:read:/etc/hosts
 ```
 
@@ -169,7 +169,7 @@ Same glob matching as network actions:
 
 | Pattern | Matches |
 |---|---|
-| `file:read:/Users/andrey/repos/*` | Any file read under repos/ |
+| `file:read:/Users/alice/repos/*` | Any file read under repos/ |
 | `file:write:$SANDBOX_TMPDIR/*` | Writes to sandbox tmpdir |
 | `file:read:*` | Read anything (template: dev-readonly) |
 
@@ -221,7 +221,7 @@ Agent can also `cat` the file directly — Seatbelt allows reads. But `ask read`
   approved_by: template:dev-workspace
 
 - effect: permit
-  action: "file:write:/Users/andrey/repos/myproject/*"
+  action: "file:write:/Users/alice/repos/myproject/*"
   type: idempotent
   approved_by: template:dev-workspace
 ```
