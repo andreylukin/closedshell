@@ -6,6 +6,11 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "macOS sandbox for AI coding agents — network-level permission enforcement via Seatbelt + MITM proxy"
+repository = "https://github.com/nichochar/closedshell"
+homepage = "https://github.com/nichochar/closedshell"
+authors = ["ClosedShell Contributors"]
+rust-version = "1.85"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

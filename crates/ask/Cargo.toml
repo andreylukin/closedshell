@@ -2,6 +2,12 @@
 name = "ask"
 version.workspace = true
 edition.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [[bin]]
 name = "ask"
