@@ -2,3 +2,6 @@
 agent_logs/
 *.lock
 closedshell-*.log
+.env
+.env.*
+.env.local

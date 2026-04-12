@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    runs-on: macos-latest
+  lint-and-audit:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,6 +19,25 @@ jobs:
 
       - name: Format
         run: cargo fmt --check
+
+      - name: Clippy (lib)
+        run: cargo clippy -p closedshell-lib -- -D warnings
+
+      - name: Test (lib)
+        run: cargo test -p closedshell-lib
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Audit
+        run: cargo audit
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
         run: cargo clippy -- -D warnings
