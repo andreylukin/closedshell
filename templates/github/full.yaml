@@ -1,0 +1,14 @@
+name: github-full
+description: "Allow GitHub API and git operations"
+rules:
+  - effect: permit
+    action: "net:*:api.github.com/*"
+    type: idempotent
+
+  - effect: permit
+    action: "net:*:github.com/*"
+    type: idempotent
+
+  - effect: permit
+    action: "net:*:uploads.github.com/*"
+    type: idempotent

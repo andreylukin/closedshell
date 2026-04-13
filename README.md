@@ -12,6 +12,28 @@ The agent gets full access to your local tools, files, and shell. The network is
 
 No root. No kernel extensions. One static Rust binary.
 
+> **macOS only.** ClosedShell uses macOS Seatbelt for sandboxing. Linux support is not currently planned — contributions welcome.
+
+---
+
+## Install
+
+**Homebrew:**
+
+```bash
+brew install andreylukin/tap/closedshell
+```
+
+**Pre-built binaries:** Download from [GitHub Releases](https://github.com/andreylukin/closedshell/releases) (Apple Silicon and Intel).
+
+**From source:**
+
+```bash
+git clone https://github.com/andreylukin/closedshell.git
+cd closedshell
+make install    # builds and installs to ~/.cargo/bin
+```
+
 ---
 
 ## How It Works
@@ -40,10 +62,6 @@ No root. No kernel extensions. One static Rust binary.
 
 ## Quick Start
 
-```bash
-make install    # builds and installs closedshell to ~/.cargo/bin
-```
-
 ### YOLO mode — log everything, block nothing
 
 ```bash
@@ -53,10 +71,21 @@ cs --yolo -- claude
 ### Enforcing mode — unknown actions block for human approval
 
 ```bash
+# Claude Code
 cs --template anthropic/full --task "refactor the auth module" -- claude
+
+# OpenAI Codex CLI
+cs --template openai/full --task "add unit tests" -- codex
+
+# Any agent or process
+cs --template github/full -- aider --model gpt-4
 ```
 
-Templates pre-approve infrastructure the agent needs to function. Without `--template anthropic/full`, Claude Code's own API calls would require manual approval in the TUI.
+Templates pre-approve infrastructure the agent needs to function. Without a template, the agent's API calls require manual approval in the TUI.
+
+### Works with any agent
+
+ClosedShell sandboxes any process — it's not tied to a specific AI tool. If the process makes HTTPS requests, ClosedShell can intercept and control them.
 
 ### TUI — monitor a live session
 
@@ -98,6 +127,9 @@ Templates are YAML files that pre-approve known-good endpoints. Bundled template
 | Template | What it permits |
 |----------|----------------|
 | `anthropic/full` | `api.anthropic.com`, `mcp-proxy.anthropic.com`, `downloads.claude.ai`, Claude Code storage |
+| `openai/full` | `api.openai.com` (all endpoints — GPT, Codex CLI, assistants, files) |
+| `github/full` | `api.github.com`, `github.com`, `uploads.github.com` |
+| `github/readonly` | `api.github.com` and `github.com` (GET only) |
 | `exa/full` | `api.exa.ai` (all endpoints) |
 | `exa/readonly` | `api.exa.ai` (read-only) |
 | `exa/search-only` | `api.exa.ai` (search only) |
@@ -120,17 +152,6 @@ sandbox:
     - GITHUB_TOKEN
     - AWS_ACCESS_KEY_ID
     - AWS_SECRET_ACCESS_KEY
-```
-
----
-
-## Building from Source
-
-```bash
-make build      # dev build
-make release    # optimized release build
-make test       # all tests
-make check      # fmt + lint + test (what CI runs)
 ```
 
 ---

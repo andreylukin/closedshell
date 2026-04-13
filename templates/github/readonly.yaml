@@ -1,0 +1,10 @@
+name: github-readonly
+description: "Allow read-only GitHub API access (GET only)"
+rules:
+  - effect: permit
+    action: "net:GET:api.github.com/*"
+    type: idempotent
+
+  - effect: permit
+    action: "net:GET:github.com/*"
+    type: idempotent

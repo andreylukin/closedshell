@@ -34,9 +34,22 @@ cargo test <test_name>       # single test
 
 Some tests require `ANTHROPIC_KEY` to be set and are skipped in CI.
 
-## Templates
+## Templates — the easiest way to contribute
 
-Permission templates live in `templates/`. They have their own contribution guidelines — see [templates/CONTRIBUTING.md](templates/CONTRIBUTING.md).
+Permission templates are YAML files that pre-approve endpoints for specific providers. They don't require any Rust knowledge and are the fastest way to contribute.
+
+**Adding a template for a new provider:**
+
+```bash
+cs template init myservice       # scaffold a new template
+# edit templates/myservice/full.yaml
+cs --yolo -- <command>           # run a YOLO session to capture traffic
+cs template generate <session>   # generate template from captured traffic
+```
+
+See [templates/CONTRIBUTING.md](templates/CONTRIBUTING.md) for the full format and guidelines.
+
+**Wanted templates:** We'd love community templates for Terraform, Vercel, Netlify, Supabase, npm/PyPI publish, Docker Hub, and any other services agents commonly hit. Check the [issues](https://github.com/andreylukin/closedshell/issues) for specific requests.
 
 ## Security
 

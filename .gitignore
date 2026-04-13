@@ -1,6 +1,6 @@
 /target
 agent_logs/
-*.lock
+closedshell-*.lock
 closedshell-*.log
 .env
 .env.*
