@@ -1,0 +1,5 @@
+@name("github-readonly")
+@description("Allow read-only GitHub API access (GET only)")
+
+permit (action == "net:GET:api.github.com/*");
+permit (action == "net:GET:github.com/*");

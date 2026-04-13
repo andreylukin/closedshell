@@ -53,6 +53,16 @@ cs --template anthropic/full --task "describe what the agent should do" -- claud
 
 **Templates** pre-approve infra the agent needs to function. Without `--template anthropic/full`, Claude Code's own API calls require manual approval in the TUI.
 
+Templates use a Cedar-inspired `.csp` (ClosedShell Policy) format:
+```
+@name("anthropic-full")
+@description("Allow all Anthropic API endpoints")
+
+permit (action == "net:*:api.anthropic.com/*");
+forbid (action == "net:*:api.anthropic.com/admin/*")
+  reason("admin access blocked");
+```
+
 Templates are resolved in order: absolute/relative path → `~/.closedshell/templates/` → built-in (compiled into the binary). Built-in templates (from `templates/` in the repo) work out of the box with no install step. User templates in `~/.closedshell/templates/` override built-in ones with the same name.
 
 Template commands: `list`, `show`, `validate`, `check`, `init`, `generate`.

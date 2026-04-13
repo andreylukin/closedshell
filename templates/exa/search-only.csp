@@ -1,0 +1,10 @@
+@name("exa-search-only")
+@description("Allow Exa search endpoint only — deny contents and findSimilar")
+
+forbid (action == "net:*:api.exa.ai/contents")
+  reason("contents endpoint not allowed by this profile");
+
+forbid (action == "net:*:api.exa.ai/findSimilar")
+  reason("findSimilar endpoint not allowed by this profile");
+
+permit (action == "net:*:api.exa.ai/search");

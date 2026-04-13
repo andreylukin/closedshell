@@ -171,33 +171,33 @@ fn handle_template_command(args: &[String], templates_dir: &Path) -> anyhow::Res
                 }
             };
 
-            let yaml = template::generate(&log_path, name)?;
+            let csp = template::generate(&log_path, name)?;
 
             // --save: write to templates dir instead of stdout
             let save = args.iter().any(|a| a == "--save");
             if save {
                 let template_name = name.unwrap_or("generated");
-                // Split on '-' to get provider/profile (e.g., "myservice-full" → "myservice/full.yaml")
+                // Split on '-' to get provider/profile (e.g., "myservice-full" → "myservice/full.csp")
                 let (dir_name, file_name) = if let Some(dash) = template_name.rfind('-') {
                     (
                         &template_name[..dash],
-                        format!("{}.yaml", &template_name[dash + 1..]),
+                        format!("{}.csp", &template_name[dash + 1..]),
                     )
                 } else {
-                    (template_name, "full.yaml".to_string())
+                    (template_name, "full.csp".to_string())
                 };
                 let dir = templates_dir.join(dir_name);
                 std::fs::create_dir_all(&dir)?;
                 let path = dir.join(&file_name);
-                std::fs::write(&path, &yaml)?;
+                std::fs::write(&path, &csp)?;
                 eprintln!("[closedshell] saved template: {}", path.display());
                 eprintln!(
                     "[closedshell] use with: cs --template {}/{}",
                     dir_name,
-                    file_name.trim_end_matches(".yaml")
+                    file_name.trim_end_matches(".csp")
                 );
             } else {
-                print!("{}", yaml);
+                print!("{}", csp);
             }
             Ok(())
         }
@@ -205,8 +205,8 @@ fn handle_template_command(args: &[String], templates_dir: &Path) -> anyhow::Res
             let name = args.get(1).ok_or_else(|| {
                 anyhow::anyhow!("usage: cs template validate <name|path>\n\nValidate a template and show a summary of its rules.")
             })?;
-            let (yaml, source) = template::resolve(name, templates_dir)?;
-            let result = template::validate(&yaml)?;
+            let (csp, source) = template::resolve(name, templates_dir)?;
+            let result = template::validate(&csp)?;
 
             eprintln!("[closedshell] template: {} ({})", result.name, source);
             if !result.description.is_empty() {
@@ -257,8 +257,8 @@ fn handle_template_command(args: &[String], templates_dir: &Path) -> anyhow::Res
                     "usage: cs template check <name|path> <action>\n\nmissing <action> argument"
                 )
             })?;
-            let (yaml, _source) = template::resolve(name, templates_dir)?;
-            let verdict = template::check(&yaml, action)?;
+            let (csp, _source) = template::resolve(name, templates_dir)?;
+            let verdict = template::check(&csp, action)?;
             match verdict {
                 template::CheckVerdict::Permit(pattern) => {
                     println!("PERMIT — matched: {}", pattern);
@@ -275,12 +275,12 @@ fn handle_template_command(args: &[String], templates_dir: &Path) -> anyhow::Res
         Some("show") => {
             let name = args.get(1).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "usage: cs template show <name|path>\n\nShow the resolved template YAML."
+                    "usage: cs template show <name|path>\n\nShow the resolved template."
                 )
             })?;
-            let (yaml, source) = template::resolve(name, templates_dir)?;
+            let (csp, source) = template::resolve(name, templates_dir)?;
             eprintln!("[closedshell] source: {}", source);
-            print!("{}", yaml);
+            print!("{}", csp);
             Ok(())
         }
         Some(other) => {
@@ -527,8 +527,8 @@ async fn main() -> anyhow::Result<()> {
     if !cli.template.is_empty() {
         let templates_dir = config::resolve_tilde(&config.sandbox.templates_dir);
         for name in &cli.template {
-            let (yaml, source) = template::resolve(name, &PathBuf::from(&templates_dir))?;
-            tree.load_template(&yaml)?;
+            let (csp, source) = template::resolve(name, &PathBuf::from(&templates_dir))?;
+            tree.load_template(&csp)?;
             tracing::info!(template = %source, "loaded permission template");
         }
     }

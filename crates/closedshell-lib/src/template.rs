@@ -1,8 +1,21 @@
 //! Template management: init, list, generate, validate, and check operations.
+//!
+//! Templates use a Cedar-inspired `.csp` (ClosedShell Policy) format:
+//!
+//! ```text
+//! @name("anthropic-full")
+//! @description("Allow all Anthropic API endpoints")
+//!
+//! // Core API
+//! permit (action == "net:*:api.anthropic.com/*");
+//!
+//! // Block admin
+//! forbid (action == "net:*:api.anthropic.com/admin/*")
+//!   reason("admin access blocked");
+//! ```
 
 use anyhow::{Context, Result, bail};
 use include_dir::{Dir, include_dir};
-use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -11,6 +24,313 @@ use crate::permission::action_glob_match;
 
 /// Bundled templates embedded at compile time from the repo's templates/ directory.
 static BUNDLED_TEMPLATES: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../templates");
+
+// ── CSP format: parser ─────────────────────────────────────────────────────
+
+/// A parsed `.csp` policy file.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    pub name: String,
+    pub description: String,
+    pub statements: Vec<Statement>,
+}
+
+/// A single permit or forbid statement.
+#[derive(Debug, Clone)]
+pub struct Statement {
+    pub effect: Effect,
+    pub action: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    Permit,
+    Forbid,
+}
+
+impl std::fmt::Display for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Effect::Permit => write!(f, "permit"),
+            Effect::Forbid => write!(f, "forbid"),
+        }
+    }
+}
+
+/// Parse a `.csp` policy string into a `Policy`.
+///
+/// Grammar:
+/// ```text
+/// file       = { annotation | statement | comment | blank }
+/// annotation = "@" IDENT "(" STRING ")"
+/// statement  = effect "(" "action" [ "==" STRING ] ")" { clause } ";"
+/// effect     = "permit" | "forbid"
+/// clause     = "reason" "(" STRING ")"
+/// comment    = "//" ...
+/// ```
+pub fn parse(input: &str) -> Result<Policy> {
+    let mut parser = Parser::new(input);
+    parser.parse_file()
+}
+
+/// Emit a `Policy` as a `.csp` string.
+pub fn emit(policy: &Policy) -> String {
+    let mut out = String::new();
+    if !policy.name.is_empty() {
+        out.push_str(&format!("@name(\"{}\")\n", escape_string(&policy.name)));
+    }
+    if !policy.description.is_empty() {
+        out.push_str(&format!(
+            "@description(\"{}\")\n",
+            escape_string(&policy.description)
+        ));
+    }
+    if !policy.name.is_empty() || !policy.description.is_empty() {
+        out.push('\n');
+    }
+    for stmt in &policy.statements {
+        out.push_str(&format!(
+            "{} (action == \"{}\"){};\n",
+            stmt.effect,
+            escape_string(&stmt.action),
+            match &stmt.reason {
+                Some(r) => format!("\n  reason(\"{}\")", escape_string(r)),
+                None => String::new(),
+            }
+        ));
+    }
+    out
+}
+
+fn escape_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+struct Parser<'a> {
+    input: &'a str,
+    pos: usize,
+}
+
+impl<'a> Parser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn parse_file(&mut self) -> Result<Policy> {
+        let mut name = String::new();
+        let mut description = String::new();
+        let mut statements = Vec::new();
+
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.pos >= self.input.len() {
+                break;
+            }
+
+            if self.peek_char() == Some('@') {
+                let (key, value) = self.parse_annotation()?;
+                match key.as_str() {
+                    "name" => name = value,
+                    "description" => description = value,
+                    other => bail!("unknown annotation @{} at position {}", other, self.pos),
+                }
+            } else if self.starts_with("permit") || self.starts_with("forbid") {
+                statements.push(self.parse_statement()?);
+            } else {
+                let snippet = &self.input[self.pos..self.input.len().min(self.pos + 30)];
+                bail!("unexpected input at position {}: {:?}", self.pos, snippet);
+            }
+        }
+
+        Ok(Policy {
+            name,
+            description,
+            statements,
+        })
+    }
+
+    fn parse_annotation(&mut self) -> Result<(String, String)> {
+        self.expect_char('@')?;
+        let key = self.parse_ident()?;
+        self.skip_whitespace();
+        self.expect_char('(')?;
+        let value = self.parse_string()?;
+        self.skip_whitespace();
+        self.expect_char(')')?;
+        Ok((key, value))
+    }
+
+    fn parse_statement(&mut self) -> Result<Statement> {
+        let effect = if self.consume_keyword("permit") {
+            Effect::Permit
+        } else if self.consume_keyword("forbid") {
+            Effect::Forbid
+        } else {
+            bail!("expected 'permit' or 'forbid' at position {}", self.pos);
+        };
+
+        self.skip_whitespace();
+        self.expect_char('(')?;
+        self.skip_whitespace();
+
+        // Parse scope: "action" or "action == <string>"
+        if !self.consume_keyword("action") {
+            bail!("expected 'action' at position {}", self.pos);
+        }
+        self.skip_whitespace();
+
+        let action = if self.starts_with("==") {
+            self.pos += 2;
+            self.skip_whitespace();
+            self.parse_string()?
+        } else {
+            // bare "action" means match everything
+            "*".to_string()
+        };
+
+        self.skip_whitespace();
+        self.expect_char(')')?;
+
+        // Parse optional clauses before semicolon
+        let mut reason = None;
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.peek_char() == Some(';') {
+                self.pos += 1;
+                break;
+            }
+            if self.starts_with("reason") {
+                self.pos += 6; // "reason"
+                self.skip_whitespace();
+                self.expect_char('(')?;
+                reason = Some(self.parse_string()?);
+                self.skip_whitespace();
+                self.expect_char(')')?;
+            } else if self.pos >= self.input.len() {
+                bail!("unexpected end of input: expected ';'");
+            } else {
+                let snippet = &self.input[self.pos..self.input.len().min(self.pos + 20)];
+                bail!(
+                    "unexpected token before ';' at position {}: {:?}",
+                    self.pos,
+                    snippet
+                );
+            }
+        }
+
+        Ok(Statement {
+            effect,
+            action,
+            reason,
+        })
+    }
+
+    fn parse_string(&mut self) -> Result<String> {
+        self.skip_whitespace();
+        self.expect_char('"')?;
+        let mut s = String::new();
+        loop {
+            match self.next_char() {
+                Some('"') => return Ok(s),
+                Some('\\') => match self.next_char() {
+                    Some('"') => s.push('"'),
+                    Some('\\') => s.push('\\'),
+                    Some('n') => s.push('\n'),
+                    Some(c) => {
+                        s.push('\\');
+                        s.push(c);
+                    }
+                    None => bail!("unexpected end of input in escape sequence"),
+                },
+                Some(c) => s.push(c),
+                None => bail!("unterminated string starting at position {}", self.pos),
+            }
+        }
+    }
+
+    fn parse_ident(&mut self) -> Result<String> {
+        let start = self.pos;
+        while self.pos < self.input.len() {
+            let c = self.input.as_bytes()[self.pos] as char;
+            if c.is_ascii_alphanumeric() || c == '_' {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if self.pos == start {
+            bail!("expected identifier at position {}", self.pos);
+        }
+        Ok(self.input[start..self.pos].to_string())
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.pos < self.input.len() {
+            let c = self.input.as_bytes()[self.pos] as char;
+            if c.is_ascii_whitespace() {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn skip_whitespace_and_comments(&mut self) {
+        loop {
+            self.skip_whitespace();
+            if self.starts_with("//") {
+                // Skip to end of line
+                while self.pos < self.input.len() && self.input.as_bytes()[self.pos] != b'\n' {
+                    self.pos += 1;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.input.as_bytes().get(self.pos).map(|&b| b as char)
+    }
+
+    fn next_char(&mut self) -> Option<char> {
+        let c = self.peek_char()?;
+        self.pos += 1;
+        Some(c)
+    }
+
+    fn expect_char(&mut self, expected: char) -> Result<()> {
+        match self.next_char() {
+            Some(c) if c == expected => Ok(()),
+            Some(c) => bail!(
+                "expected '{}' but got '{}' at position {}",
+                expected,
+                c,
+                self.pos - 1
+            ),
+            None => bail!("expected '{}' but reached end of input", expected),
+        }
+    }
+
+    fn starts_with(&self, s: &str) -> bool {
+        self.input[self.pos..].starts_with(s)
+    }
+
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        if self.starts_with(keyword) {
+            let after = self.pos + keyword.len();
+            // Must be followed by non-alphanumeric (word boundary)
+            if after >= self.input.len() || !self.input.as_bytes()[after].is_ascii_alphanumeric() {
+                self.pos = after;
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// ── Template source ────────────────────────────────────────────────────────
 
 /// Where a template came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,16 +358,18 @@ pub struct TemplateInfo {
     pub source: TemplateSource,
 }
 
+// ── Public API ─────────────────────────────────────────────────────────────
+
 /// Scaffold a new template for the given provider.
 ///
-/// Creates `<templates_dir>/<provider>/full.yaml` with provider-specific
+/// Creates `<templates_dir>/<provider>/full.csp` with provider-specific
 /// action patterns. Returns the path of the created file.
 pub fn init(templates_dir: &Path, provider: &str) -> Result<PathBuf> {
     let dir = templates_dir.join(provider);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create directory {}", dir.display()))?;
 
-    let path = dir.join("full.yaml");
+    let path = dir.join("full.csp");
     if path.exists() {
         bail!(
             "template already exists: {}\nEdit it directly or remove it first.",
@@ -55,8 +377,8 @@ pub fn init(templates_dir: &Path, provider: &str) -> Result<PathBuf> {
         );
     }
 
-    let yaml = scaffold_yaml(provider);
-    std::fs::write(&path, &yaml).with_context(|| format!("failed to write {}", path.display()))?;
+    let csp = scaffold_csp(provider);
+    std::fs::write(&path, &csp).with_context(|| format!("failed to write {}", path.display()))?;
 
     Ok(path)
 }
@@ -73,22 +395,18 @@ pub fn list(templates_dir: &Path) -> Result<Vec<TemplateInfo>> {
 
     // 2. Load user templates (override bundled by name)
     if templates_dir.exists() {
-        walk_yaml_files(templates_dir, &mut |path| {
-            match parse_template_info(&path) {
+        walk_csp_files(
+            templates_dir,
+            &mut |path| match parse_template_info(&path) {
                 Ok(mut info) => {
-                    info.source = if by_name.contains_key(&info.name) {
-                        // User is overriding a built-in
-                        TemplateSource::User
-                    } else {
-                        TemplateSource::User
-                    };
+                    info.source = TemplateSource::User;
                     by_name.insert(info.name.clone(), info);
                 }
                 Err(e) => {
                     eprintln!("[closedshell] warning: skipping {}: {}", path.display(), e);
                 }
-            }
-        })?;
+            },
+        )?;
     }
 
     let mut results: Vec<TemplateInfo> = by_name.into_values().collect();
@@ -96,40 +414,40 @@ pub fn list(templates_dir: &Path) -> Result<Vec<TemplateInfo>> {
     Ok(results)
 }
 
-/// Resolve a template name to its YAML contents.
+/// Resolve a template name to its CSP contents.
 ///
 /// Resolution order:
 /// 1. Absolute/relative path on disk
-/// 2. User templates dir (`~/.closedshell/templates/<name>.yaml`)
+/// 2. User templates dir (`~/.closedshell/templates/<name>.csp`)
 /// 3. Bundled (compiled-in) templates
 ///
-/// Returns the YAML string and the source description for logging.
+/// Returns the CSP string and the source description for logging.
 pub fn resolve(name: &str, templates_dir: &Path) -> Result<(String, String)> {
     let raw = Path::new(name);
 
     // 1. Direct path
     if raw.exists() {
-        let yaml = std::fs::read_to_string(raw)
+        let csp = std::fs::read_to_string(raw)
             .with_context(|| format!("failed to read template {}", raw.display()))?;
-        return Ok((yaml, raw.display().to_string()));
+        return Ok((csp, raw.display().to_string()));
     }
-    if raw.with_extension("yaml").exists() {
-        let p = raw.with_extension("yaml");
-        let yaml = std::fs::read_to_string(&p)
+    if raw.with_extension("csp").exists() {
+        let p = raw.with_extension("csp");
+        let csp = std::fs::read_to_string(&p)
             .with_context(|| format!("failed to read template {}", p.display()))?;
-        return Ok((yaml, p.display().to_string()));
+        return Ok((csp, p.display().to_string()));
     }
 
     // 2. User templates dir
-    let user_path = templates_dir.join(format!("{}.yaml", name));
+    let user_path = templates_dir.join(format!("{}.csp", name));
     if user_path.exists() {
-        let yaml = std::fs::read_to_string(&user_path)
+        let csp = std::fs::read_to_string(&user_path)
             .with_context(|| format!("failed to read template {}", user_path.display()))?;
-        return Ok((yaml, user_path.display().to_string()));
+        return Ok((csp, user_path.display().to_string()));
     }
 
     // 3. Bundled templates
-    let bundled_path = format!("{}.yaml", name);
+    let bundled_path = format!("{}.csp", name);
     if let Some(file) = BUNDLED_TEMPLATES.get_file(&bundled_path) {
         if let Some(contents) = file.contents_utf8() {
             return Ok((contents.to_string(), format!("built-in:{}", name)));
@@ -154,59 +472,40 @@ pub struct ValidateResult {
     pub warnings: Vec<String>,
 }
 
-/// Validate a template's YAML and return a structured summary.
-///
-/// Checks: valid YAML, required fields, valid effect/type values, non-empty action patterns.
-pub fn validate(yaml: &str) -> Result<ValidateResult> {
-    let tpl: FullTemplate =
-        serde_yaml::from_str(yaml).context("invalid YAML: failed to parse template")?;
+/// Validate a template's CSP source and return a structured summary.
+pub fn validate(csp: &str) -> Result<ValidateResult> {
+    let policy = parse(csp).context("failed to parse template")?;
 
     let mut permits = Vec::new();
     let mut forbids = Vec::new();
     let mut warnings = Vec::new();
 
-    if tpl.name.is_empty() {
-        warnings.push("template name is empty".to_string());
+    if policy.name.is_empty() {
+        warnings.push("template has no @name annotation".to_string());
     }
-    if tpl.rules.is_empty() {
+    if policy.statements.is_empty() {
         warnings.push("template has no rules".to_string());
     }
 
-    for (i, rule) in tpl.rules.iter().enumerate() {
+    for (i, stmt) in policy.statements.iter().enumerate() {
         let idx = i + 1;
-        match rule.effect.as_str() {
-            "permit" => {
-                if let Some(ref rt) = rule.rule_type {
-                    if rt != "idempotent" && rt != "one-shot" && rt != "oneshot" {
-                        warnings.push(format!(
-                            "rule {}: unknown type '{}' (expected 'idempotent' or 'one-shot')",
-                            idx, rt
-                        ));
-                    }
-                }
-                permits.push(rule.action.clone());
-            }
-            "forbid" => {
-                if rule.reason.is_none() {
+        match stmt.effect {
+            Effect::Permit => permits.push(stmt.action.clone()),
+            Effect::Forbid => {
+                if stmt.reason.is_none() {
                     warnings.push(format!("rule {}: forbid rule has no reason", idx));
                 }
-                forbids.push(rule.action.clone());
-            }
-            other => {
-                warnings.push(format!(
-                    "rule {}: unknown effect '{}' (expected 'permit' or 'forbid')",
-                    idx, other
-                ));
+                forbids.push(stmt.action.clone());
             }
         }
-        if rule.action.is_empty() {
+        if stmt.action.is_empty() {
             warnings.push(format!("rule {}: action pattern is empty", idx));
         }
     }
 
     Ok(ValidateResult {
-        name: tpl.name,
-        description: tpl.description.unwrap_or_default(),
+        name: policy.name,
+        description: policy.description,
         permits,
         forbids,
         warnings,
@@ -224,21 +523,20 @@ pub enum CheckVerdict {
 /// Check whether an action would be permitted, forbidden, or unmatched by a template.
 ///
 /// Uses the same Cedar-inspired semantics as the runtime: forbid overrides permit.
-pub fn check(yaml: &str, action: &str) -> Result<CheckVerdict> {
-    let tpl: FullTemplate =
-        serde_yaml::from_str(yaml).context("invalid YAML: failed to parse template")?;
+pub fn check(csp: &str, action: &str) -> Result<CheckVerdict> {
+    let policy = parse(csp).context("failed to parse template")?;
 
     // Phase 1: any forbid match → deny
-    for rule in &tpl.rules {
-        if rule.effect == "forbid" && action_glob_match(&rule.action, action) {
-            return Ok(CheckVerdict::Forbid(rule.action.clone()));
+    for stmt in &policy.statements {
+        if stmt.effect == Effect::Forbid && action_glob_match(&stmt.action, action) {
+            return Ok(CheckVerdict::Forbid(stmt.action.clone()));
         }
     }
 
     // Phase 2: any permit match → allow
-    for rule in &tpl.rules {
-        if rule.effect == "permit" && action_glob_match(&rule.action, action) {
-            return Ok(CheckVerdict::Permit(rule.action.clone()));
+    for stmt in &policy.statements {
+        if stmt.effect == Effect::Permit && action_glob_match(&stmt.action, action) {
+            return Ok(CheckVerdict::Permit(stmt.action.clone()));
         }
     }
 
@@ -246,29 +544,10 @@ pub fn check(yaml: &str, action: &str) -> Result<CheckVerdict> {
     Ok(CheckVerdict::NoMatch)
 }
 
-/// Full template struct for validate/check (includes all fields).
-#[derive(Deserialize)]
-struct FullTemplate {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    rules: Vec<FullTemplateRule>,
-}
-
-#[derive(Deserialize)]
-struct FullTemplateRule {
-    effect: String,
-    action: String,
-    #[serde(rename = "type")]
-    rule_type: Option<String>,
-    reason: Option<String>,
-}
-
 /// Generate a template from a YOLO session's audit log.
 ///
 /// Reads the NDJSON log, extracts allowed actions, deduplicates and groups
-/// them, then emits a YAML template string.
+/// them, then emits a `.csp` template string.
 pub fn generate(log_path: &Path, name: Option<&str>) -> Result<String> {
     let file = std::fs::File::open(log_path)
         .with_context(|| format!("failed to open log: {}", log_path.display()))?;
@@ -283,7 +562,7 @@ pub fn generate(log_path: &Path, name: Option<&str>) -> Result<String> {
         }
         let event: LogEvent = match serde_json::from_str(&line) {
             Ok(e) => e,
-            Err(_) => continue, // skip unparseable lines
+            Err(_) => continue,
         };
         if event.event == "decision"
             && event.result.as_deref().is_some_and(|r| r.contains("allow"))
@@ -300,54 +579,55 @@ pub fn generate(log_path: &Path, name: Option<&str>) -> Result<String> {
     // Group and collapse actions into template rules
     let rules = collapse_actions(&actions);
 
-    // Build YAML output
     let template_name = name.unwrap_or("generated");
-    let mut yaml = String::new();
-    yaml.push_str(&format!("name: {}\n", template_name));
-    yaml.push_str(&format!(
-        "description: \"Auto-generated from session log ({})\"\n",
-        log_path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    yaml.push_str("rules:\n");
-    for action in &rules {
-        yaml.push_str("  - effect: permit\n");
-        yaml.push_str(&format!("    action: \"{}\"\n", action));
-        yaml.push_str("    type: idempotent\n");
-        yaml.push_str('\n'.to_string().as_str());
-    }
+    let policy = Policy {
+        name: template_name.to_string(),
+        description: format!(
+            "Auto-generated from session log ({})",
+            log_path.file_name().unwrap_or_default().to_string_lossy()
+        ),
+        statements: rules
+            .into_iter()
+            .map(|action| Statement {
+                effect: Effect::Permit,
+                action,
+                reason: None,
+            })
+            .collect(),
+    };
 
-    Ok(yaml)
+    Ok(emit(&policy))
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
 
 /// Minimal audit log event for deserialization (only the fields we need).
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct LogEvent {
     event: String,
     action: Option<String>,
     result: Option<String>,
 }
 
-/// Recursively collect bundled `.yaml` templates from an embedded directory.
+/// Recursively collect bundled `.csp` templates from an embedded directory.
 fn collect_bundled_dir(dir: &Dir, out: &mut BTreeMap<String, TemplateInfo>) {
     for file in dir.files() {
-        if file.path().extension().and_then(|e| e.to_str()) != Some("yaml") {
+        if file.path().extension().and_then(|e| e.to_str()) != Some("csp") {
             continue;
         }
         let Some(contents) = file.contents_utf8() else {
             continue;
         };
-        let Ok(meta) = serde_yaml::from_str::<TemplateMeta>(contents) else {
+        let Ok(policy) = parse(contents) else {
             continue;
         };
         out.insert(
-            meta.name.clone(),
+            policy.name.clone(),
             TemplateInfo {
-                name: meta.name,
-                description: meta.description.unwrap_or_default(),
+                name: policy.name,
+                description: policy.description,
                 path: PathBuf::from("(built-in)"),
-                rule_count: meta.rules.len(),
+                rule_count: policy.statements.len(),
                 source: TemplateSource::BuiltIn,
             },
         );
@@ -357,8 +637,8 @@ fn collect_bundled_dir(dir: &Dir, out: &mut BTreeMap<String, TemplateInfo>) {
     }
 }
 
-/// Walk a directory recursively, calling `f` for each `.yaml` file.
-fn walk_yaml_files(dir: &Path, f: &mut dyn FnMut(PathBuf)) -> Result<()> {
+/// Walk a directory recursively, calling `f` for each `.csp` file.
+fn walk_csp_files(dir: &Path, f: &mut dyn FnMut(PathBuf)) -> Result<()> {
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("failed to read directory {}", dir.display()))?;
 
@@ -366,55 +646,40 @@ fn walk_yaml_files(dir: &Path, f: &mut dyn FnMut(PathBuf)) -> Result<()> {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            walk_yaml_files(&path, f)?;
-        } else if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
+            walk_csp_files(&path, f)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("csp") {
             f(path);
         }
     }
     Ok(())
 }
 
-/// Parse a YAML template file to extract metadata.
-#[derive(Deserialize)]
-struct TemplateMeta {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    rules: Vec<serde_yaml::Value>,
-}
-
 fn parse_template_info(path: &Path) -> Result<TemplateInfo> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let meta: TemplateMeta = serde_yaml::from_str(&contents)
-        .with_context(|| format!("invalid YAML in {}", path.display()))?;
+    let policy = parse(&contents).with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(TemplateInfo {
-        name: meta.name,
-        description: meta.description.unwrap_or_default(),
+        name: policy.name,
+        description: policy.description,
         path: path.to_path_buf(),
-        rule_count: meta.rules.len(),
+        rule_count: policy.statements.len(),
         source: TemplateSource::User,
     })
 }
 
 /// Collapse a set of action strings into grouped glob patterns.
 ///
-/// - `net:METHOD:host/path` actions are grouped by host. Multiple paths → `net:*:host/*`.
+/// - `net:METHOD:host/path` actions are grouped by host → `net:*:host/*`.
 /// - Provider actions (`aws:service:op`, `gcp:service:op`) are grouped by
 ///   `provider:service` → `provider:service:*`.
 /// - Other actions pass through as-is.
 fn collapse_actions(actions: &BTreeSet<String>) -> Vec<String> {
-    // net actions: group by host
     let mut net_hosts: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    // provider actions: group by provider:service
     let mut provider_services: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    // anything else
     let mut other: BTreeSet<String> = BTreeSet::new();
 
     for action in actions {
         if action.starts_with("net:") {
-            // Format: net:METHOD:host/path
             if let Some((host, path)) = parse_net_action(action) {
                 net_hosts.entry(host).or_default().insert(path);
             } else {
@@ -432,18 +697,9 @@ fn collapse_actions(actions: &BTreeSet<String>) -> Vec<String> {
 
     let mut rules = Vec::new();
 
-    // Collapse net actions
-    for (host, paths) in &net_hosts {
-        if paths.len() > 1 {
-            rules.push(format!("net:*:{}/*", host));
-        } else {
-            let path = paths.iter().next().unwrap();
-            if path == "/" || path == "/*" {
-                rules.push(format!("net:*:{}/*", host));
-            } else {
-                rules.push(format!("net:*:{}{}", host, path));
-            }
-        }
+    // Collapse net actions — always wildcard to host/*
+    for host in net_hosts.keys() {
+        rules.push(format!("net:*:{}/*", host));
     }
 
     // Collapse provider actions
@@ -455,7 +711,6 @@ fn collapse_actions(actions: &BTreeSet<String>) -> Vec<String> {
         }
     }
 
-    // Pass through other actions
     for action in &other {
         rules.push(action.clone());
     }
@@ -465,12 +720,9 @@ fn collapse_actions(actions: &BTreeSet<String>) -> Vec<String> {
 
 /// Parse `net:METHOD:host/path` → `(host, /path)`.
 fn parse_net_action(action: &str) -> Option<(String, String)> {
-    // Strip "net:" prefix
     let rest = action.strip_prefix("net:")?;
-    // Skip METHOD up to the next ":"
     let colon = rest.find(':')?;
     let host_path = &rest[colon + 1..];
-    // Split host from path at first "/"
     if let Some(slash) = host_path.find('/') {
         let host = &host_path[..slash];
         let path = &host_path[slash..];
@@ -481,9 +733,6 @@ fn parse_net_action(action: &str) -> Option<(String, String)> {
 }
 
 /// Parse provider action into `(prefix, operation)`.
-///
-/// Handles both `provider:service:op` and `provider[qualifier]:service:op`.
-/// Only matches known provider prefixes (aws, gcp, azure, k8s).
 fn parse_provider_action(action: &str) -> Option<(String, String)> {
     let known_providers = ["aws", "gcp", "azure", "k8s"];
     for provider in &known_providers {
@@ -491,11 +740,9 @@ fn parse_provider_action(action: &str) -> Option<(String, String)> {
             continue;
         }
         let after_provider = &action[provider.len()..];
-        // Must be followed by ':' or '[' (qualifier)
         if !after_provider.starts_with(':') && !after_provider.starts_with('[') {
             continue;
         }
-        // Find the last ":" to split prefix:operation
         if let Some(last_colon) = action.rfind(':') {
             if last_colon == 0 {
                 continue;
@@ -510,69 +757,43 @@ fn parse_provider_action(action: &str) -> Option<(String, String)> {
     None
 }
 
-/// Generate scaffold YAML for a provider.
-fn scaffold_yaml(provider: &str) -> String {
+/// Generate scaffold CSP for a provider.
+fn scaffold_csp(provider: &str) -> String {
     match provider {
-        "aws" => r#"name: aws-full
-description: "Allow common AWS service endpoints"
-rules:
-  - effect: permit
-    action: "aws[profile=*]:s3:*"
-    type: idempotent
-
-  - effect: permit
-    action: "aws[profile=*]:ec2:Describe*"
-    type: idempotent
-
-  - effect: permit
-    action: "aws[profile=*]:sts:*"
-    type: idempotent
-"#
-        .to_string(),
-        "gcp" => r#"name: gcp-full
-description: "Allow common GCP service endpoints"
-rules:
-  - effect: permit
-    action: "gcp[project=*]:storage:*"
-    type: idempotent
-
-  - effect: permit
-    action: "gcp[project=*]:compute:*"
-    type: idempotent
-"#
-        .to_string(),
-        "azure" => r#"name: azure-full
-description: "Allow Azure management plane endpoints"
-rules:
-  - effect: permit
-    action: "net:*:management.azure.com/*"
-    type: idempotent
-
-  - effect: permit
-    action: "net:*:login.microsoftonline.com/*"
-    type: idempotent
-"#
-        .to_string(),
-        "github" => r#"name: github-full
-description: "Allow GitHub API endpoints"
-rules:
-  - effect: permit
-    action: "net:*:api.github.com/*"
-    type: idempotent
-
-  - effect: permit
-    action: "net:*:github.com/*"
-    type: idempotent
-"#
-        .to_string(),
+        "aws" => "\
+@name(\"aws-full\")\n\
+@description(\"Allow common AWS service endpoints\")\n\
+\n\
+permit (action == \"aws[profile=*]:s3:*\");\n\
+permit (action == \"aws[profile=*]:ec2:Describe*\");\n\
+permit (action == \"aws[profile=*]:sts:*\");\n"
+            .to_string(),
+        "gcp" => "\
+@name(\"gcp-full\")\n\
+@description(\"Allow common GCP service endpoints\")\n\
+\n\
+permit (action == \"gcp[project=*]:storage:*\");\n\
+permit (action == \"gcp[project=*]:compute:*\");\n"
+            .to_string(),
+        "azure" => "\
+@name(\"azure-full\")\n\
+@description(\"Allow Azure management plane endpoints\")\n\
+\n\
+permit (action == \"net:*:management.azure.com/*\");\n\
+permit (action == \"net:*:login.microsoftonline.com/*\");\n"
+            .to_string(),
+        "github" => "\
+@name(\"github-full\")\n\
+@description(\"Allow GitHub API endpoints\")\n\
+\n\
+permit (action == \"net:*:api.github.com/*\");\n\
+permit (action == \"net:*:github.com/*\");\n"
+            .to_string(),
         provider => format!(
-            r#"name: {provider}-full
-description: "Allow all {provider} endpoints"
-rules:
-  - effect: permit
-    action: "net:*:{provider}.com/*"
-    type: idempotent
-"#
+            "@name(\"{provider}-full\")\n\
+             @description(\"Allow all {provider} endpoints\")\n\
+             \n\
+             permit (action == \"net:*:{provider}.com/*\");\n"
         ),
     }
 }
@@ -581,17 +802,117 @@ rules:
 mod tests {
     use super::*;
 
+    // ── Parser tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_minimal() {
+        let csp = r#"permit (action == "net:*:api.example.com/*");"#;
+        let policy = parse(csp).unwrap();
+        assert_eq!(policy.statements.len(), 1);
+        assert_eq!(policy.statements[0].effect, Effect::Permit);
+        assert_eq!(policy.statements[0].action, "net:*:api.example.com/*");
+    }
+
+    #[test]
+    fn test_parse_full() {
+        let csp = r#"
+@name("test-full")
+@description("A test template")
+
+// Core API
+permit (action == "net:*:api.example.com/*");
+
+// Block admin
+forbid (action == "net:*:api.example.com/admin/*")
+  reason("admin access blocked");
+"#;
+        let policy = parse(csp).unwrap();
+        assert_eq!(policy.name, "test-full");
+        assert_eq!(policy.description, "A test template");
+        assert_eq!(policy.statements.len(), 2);
+        assert_eq!(policy.statements[0].effect, Effect::Permit);
+        assert_eq!(policy.statements[1].effect, Effect::Forbid);
+        assert_eq!(
+            policy.statements[1].reason.as_deref(),
+            Some("admin access blocked")
+        );
+    }
+
+    #[test]
+    fn test_parse_bare_action() {
+        let csp = r#"permit (action);"#;
+        let policy = parse(csp).unwrap();
+        assert_eq!(policy.statements[0].action, "*");
+    }
+
+    #[test]
+    fn test_parse_escaped_string() {
+        let csp = r#"permit (action == "net:*:api.example.com/\"path\"");"#;
+        let policy = parse(csp).unwrap();
+        assert_eq!(
+            policy.statements[0].action,
+            "net:*:api.example.com/\"path\""
+        );
+    }
+
+    #[test]
+    fn test_parse_error_unterminated_string() {
+        let result = parse(r#"permit (action == "unterminated);"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_error_missing_semicolon() {
+        let result = parse(r#"permit (action == "foo")"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_error_unknown_annotation() {
+        let result = parse(r#"@unknown("foo") permit (action);"#);
+        assert!(result.is_err());
+    }
+
+    // ── Emit tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_emit_roundtrip() {
+        let policy = Policy {
+            name: "test".to_string(),
+            description: "A test".to_string(),
+            statements: vec![
+                Statement {
+                    effect: Effect::Permit,
+                    action: "net:*:api.example.com/*".to_string(),
+                    reason: None,
+                },
+                Statement {
+                    effect: Effect::Forbid,
+                    action: "net:*:api.example.com/admin/*".to_string(),
+                    reason: Some("blocked".to_string()),
+                },
+            ],
+        };
+        let csp = emit(&policy);
+        let parsed = parse(&csp).unwrap();
+        assert_eq!(parsed.name, "test");
+        assert_eq!(parsed.statements.len(), 2);
+        assert_eq!(parsed.statements[1].reason.as_deref(), Some("blocked"));
+    }
+
+    // ── Init tests ─────────────────────────────────────────────────────────
+
     #[test]
     fn test_init_creates_template() {
         let dir = tempfile::tempdir().unwrap();
         let path = init(dir.path(), "myservice").unwrap();
 
         assert!(path.exists());
-        assert!(path.ends_with("myservice/full.yaml"));
+        assert!(path.ends_with("myservice/full.csp"));
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("name: myservice-full"));
-        assert!(contents.contains("net:*:myservice.com/*"));
+        let policy = parse(&contents).unwrap();
+        assert_eq!(policy.name, "myservice-full");
     }
 
     #[test]
@@ -600,7 +921,8 @@ mod tests {
         let path = init(dir.path(), "aws").unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("name: aws-full"));
+        let policy = parse(&contents).unwrap();
+        assert_eq!(policy.name, "aws-full");
         assert!(contents.contains("aws[profile=*]:s3:*"));
     }
 
@@ -614,11 +936,12 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
 
+    // ── List tests ─────────────────────────────────────────────────────────
+
     #[test]
     fn test_list_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
         let results = list(dir.path()).unwrap();
-        // Should still contain bundled templates
         assert!(!results.is_empty());
         assert!(results.iter().all(|t| t.source == TemplateSource::BuiltIn));
     }
@@ -640,12 +963,11 @@ mod tests {
     #[test]
     fn test_list_user_overrides_builtin() {
         let dir = tempfile::tempdir().unwrap();
-        // Create a user template with same name as a bundled one
         let anthropic_dir = dir.path().join("anthropic");
         std::fs::create_dir_all(&anthropic_dir).unwrap();
         std::fs::write(
-            anthropic_dir.join("full.yaml"),
-            "name: anthropic-full\ndescription: \"Custom override\"\nrules: []\n",
+            anthropic_dir.join("full.csp"),
+            "@name(\"anthropic-full\")\n@description(\"Custom override\")\n\npermit (action == \"net:*:api.anthropic.com/*\");\n",
         )
         .unwrap();
 
@@ -658,7 +980,6 @@ mod tests {
     #[test]
     fn test_list_nonexistent_dir() {
         let results = list(Path::new("/nonexistent/path")).unwrap();
-        // Should still return bundled templates
         assert!(!results.is_empty());
     }
 
@@ -669,15 +990,19 @@ mod tests {
         let names: Vec<_> = results.iter().map(|t| t.name.as_str()).collect();
         assert!(
             names.contains(&"anthropic-full"),
-            "should include anthropic-full"
+            "should include anthropic-full, got: {:?}",
+            names
         );
     }
+
+    // ── Resolve tests ──────────────────────────────────────────────────────
 
     #[test]
     fn test_resolve_bundled() {
         let dir = tempfile::tempdir().unwrap();
-        let (yaml, source) = resolve("anthropic/full", dir.path()).unwrap();
-        assert!(yaml.contains("name: anthropic-full"));
+        let (csp, source) = resolve("anthropic/full", dir.path()).unwrap();
+        let policy = parse(&csp).unwrap();
+        assert_eq!(policy.name, "anthropic-full");
         assert!(source.contains("built-in"));
     }
 
@@ -687,13 +1012,13 @@ mod tests {
         let anthropic_dir = dir.path().join("anthropic");
         std::fs::create_dir_all(&anthropic_dir).unwrap();
         std::fs::write(
-            anthropic_dir.join("full.yaml"),
-            "name: anthropic-full\ndescription: \"User override\"\nrules: []\n",
+            anthropic_dir.join("full.csp"),
+            "@name(\"anthropic-full\")\n@description(\"User override\")\npermit (action);\n",
         )
         .unwrap();
 
-        let (yaml, source) = resolve("anthropic/full", dir.path()).unwrap();
-        assert!(yaml.contains("User override"));
+        let (csp, source) = resolve("anthropic/full", dir.path()).unwrap();
+        assert!(csp.contains("User override"));
         assert!(!source.contains("built-in"));
     }
 
@@ -707,12 +1032,112 @@ mod tests {
         assert!(err.contains("cs template list"));
     }
 
+    // ── Validate tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_valid_template() {
+        let csp = r#"
+@name("test-full")
+@description("Test template")
+
+permit (action == "net:*:api.example.com/*");
+forbid (action == "net:*:api.example.com/admin/*")
+  reason("admin endpoints blocked");
+"#;
+        let result = validate(csp).unwrap();
+        assert_eq!(result.name, "test-full");
+        assert_eq!(result.permits.len(), 1);
+        assert_eq!(result.forbids.len(), 1);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validate_warnings_no_name() {
+        let csp = r#"
+forbid (action == "net:*:evil.com/*");
+"#;
+        let result = validate(csp).unwrap();
+        assert!(result.warnings.iter().any(|w| w.contains("@name")));
+        assert!(result.warnings.iter().any(|w| w.contains("no reason")));
+    }
+
+    #[test]
+    fn test_validate_invalid_syntax() {
+        let result = validate("not valid csp at all {{{");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_bundled_templates() {
+        fn check_dir(dir: &Dir) {
+            for file in dir.files() {
+                if file.path().extension().and_then(|e| e.to_str()) != Some("csp") {
+                    continue;
+                }
+                let contents = file.contents_utf8().unwrap();
+                let result = validate(contents)
+                    .unwrap_or_else(|e| panic!("failed to validate {:?}: {}", file.path(), e));
+                assert!(
+                    result.warnings.is_empty(),
+                    "bundled template {:?} has warnings: {:?}",
+                    file.path(),
+                    result.warnings
+                );
+            }
+            for subdir in dir.dirs() {
+                check_dir(subdir);
+            }
+        }
+        check_dir(&BUNDLED_TEMPLATES);
+    }
+
+    // ── Check tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_check_permit() {
+        let csp = r#"
+@name("test")
+permit (action == "net:*:api.example.com/*");
+"#;
+        let verdict = check(csp, "net:GET:api.example.com/v1/users").unwrap();
+        assert_eq!(
+            verdict,
+            CheckVerdict::Permit("net:*:api.example.com/*".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_forbid_overrides_permit() {
+        let csp = r#"
+@name("test")
+permit (action == "net:*:api.example.com/*");
+forbid (action == "net:*:api.example.com/admin/*")
+  reason("no admin");
+"#;
+        let verdict = check(csp, "net:POST:api.example.com/admin/delete").unwrap();
+        assert_eq!(
+            verdict,
+            CheckVerdict::Forbid("net:*:api.example.com/admin/*".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_no_match() {
+        let csp = r#"
+@name("test")
+permit (action == "net:*:api.example.com/*");
+"#;
+        let verdict = check(csp, "net:GET:api.other.com/foo").unwrap();
+        assert_eq!(verdict, CheckVerdict::NoMatch);
+    }
+
+    // ── Generate tests ─────────────────────────────────────────────────────
+
     #[test]
     fn test_generate_from_log() {
         let dir = tempfile::tempdir().unwrap();
         let log_path = dir.path().join("test.log");
 
-        // Write sample NDJSON audit log
         let log_content = r#"{"ts":"2025-01-01T00:00:00Z","session":"abc","event":"session_start","command":"curl","yolo":true}
 {"ts":"2025-01-01T00:00:01Z","session":"abc","event":"decision","action":"net:GET:api.example.com/v1/users","result":"allow (yolo)","decided_by":"yolo","latency_ms":0,"request":{"method":"GET","host":"api.example.com","path":"/v1/users"}}
 {"ts":"2025-01-01T00:00:02Z","session":"abc","event":"decision","action":"net:POST:api.example.com/v1/data","result":"allow (yolo)","decided_by":"yolo","latency_ms":0,"request":{"method":"POST","host":"api.example.com","path":"/v1/data"}}
@@ -721,19 +1146,20 @@ mod tests {
 "#;
         std::fs::write(&log_path, log_content).unwrap();
 
-        let yaml = generate(&log_path, Some("test-template")).unwrap();
+        let csp = generate(&log_path, Some("test-template")).unwrap();
 
-        // Should contain the template name
-        assert!(yaml.contains("name: test-template"));
+        // Should be valid CSP
+        let policy = parse(&csp).unwrap();
+        assert_eq!(policy.name, "test-template");
 
-        // api.example.com had multiple paths → should be collapsed to wildcard
-        assert!(yaml.contains("net:*:api.example.com/*"));
+        // api.example.com had multiple paths → collapsed to wildcard
+        assert!(csp.contains("net:*:api.example.com/*"));
 
-        // cdn.other.io had a single path → should keep the specific path
-        assert!(yaml.contains("net:*:cdn.other.io/assets/logo.png"));
+        // cdn.other.io had a single path → still wildcards to host/*
+        assert!(csp.contains("net:*:cdn.other.io/*"));
 
         // Denied action should NOT appear
-        assert!(!yaml.contains("api.blocked.com"));
+        assert!(!csp.contains("api.blocked.com"));
     }
 
     #[test]
@@ -762,11 +1188,11 @@ mod tests {
 "#;
         std::fs::write(&log_path, log_content).unwrap();
 
-        let yaml = generate(&log_path, Some("aws-observed")).unwrap();
-
-        // Two aws:s3 ops should collapse to aws[profile=dev]:s3:*
-        assert!(yaml.contains("aws[profile=dev]:s3:*"));
+        let csp = generate(&log_path, Some("aws-observed")).unwrap();
+        assert!(csp.contains("aws[profile=dev]:s3:*"));
     }
+
+    // ── Collapse tests ─────────────────────────────────────────────────────
 
     #[test]
     fn test_collapse_single_net_action() {
@@ -774,7 +1200,7 @@ mod tests {
         actions.insert("net:GET:api.exa.ai/search".to_string());
 
         let rules = collapse_actions(&actions);
-        assert_eq!(rules, vec!["net:*:api.exa.ai/search"]);
+        assert_eq!(rules, vec!["net:*:api.exa.ai/*"]);
     }
 
     #[test]
@@ -815,136 +1241,17 @@ mod tests {
     }
 
     #[test]
-    fn test_scaffold_yaml_valid() {
-        // Verify all scaffolds produce valid YAML that matches the template schema
+    fn test_scaffold_csp_valid() {
         for provider in &["aws", "gcp", "azure", "github", "myservice"] {
-            let yaml = scaffold_yaml(provider);
-            let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml)
-                .unwrap_or_else(|e| panic!("invalid YAML for {}: {}", provider, e));
-            assert!(parsed["name"].is_string(), "missing name for {}", provider);
+            let csp = scaffold_csp(provider);
+            let policy =
+                parse(&csp).unwrap_or_else(|e| panic!("invalid CSP for {}: {}", provider, e));
+            assert!(!policy.name.is_empty(), "missing name for {}", provider);
             assert!(
-                parsed["rules"].is_sequence(),
-                "missing rules for {}",
+                !policy.statements.is_empty(),
+                "no statements for {}",
                 provider
             );
         }
-    }
-
-    #[test]
-    fn test_validate_valid_template() {
-        let yaml = r#"
-name: test-full
-description: "Test template"
-rules:
-  - effect: permit
-    action: "net:*:api.example.com/*"
-    type: idempotent
-  - effect: forbid
-    action: "net:*:api.example.com/admin/*"
-    reason: "admin endpoints blocked"
-"#;
-        let result = validate(yaml).unwrap();
-        assert_eq!(result.name, "test-full");
-        assert_eq!(result.permits.len(), 1);
-        assert_eq!(result.forbids.len(), 1);
-        assert!(result.warnings.is_empty());
-    }
-
-    #[test]
-    fn test_validate_warnings() {
-        let yaml = r#"
-name: ""
-description: "Bad template"
-rules:
-  - effect: permit
-    action: ""
-    type: badtype
-  - effect: forbid
-    action: "net:*:evil.com/*"
-  - effect: nope
-    action: "net:*:x.com/*"
-"#;
-        let result = validate(yaml).unwrap();
-        assert!(result.warnings.len() >= 3); // empty name, empty action, bad type, no reason, bad effect
-    }
-
-    #[test]
-    fn test_validate_invalid_yaml() {
-        let result = validate("not: valid: yaml: [");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_check_permit() {
-        let yaml = r#"
-name: test
-rules:
-  - effect: permit
-    action: "net:*:api.example.com/*"
-    type: idempotent
-"#;
-        let verdict = check(yaml, "net:GET:api.example.com/v1/users").unwrap();
-        assert_eq!(
-            verdict,
-            CheckVerdict::Permit("net:*:api.example.com/*".to_string())
-        );
-    }
-
-    #[test]
-    fn test_check_forbid_overrides_permit() {
-        let yaml = r#"
-name: test
-rules:
-  - effect: permit
-    action: "net:*:api.example.com/*"
-    type: idempotent
-  - effect: forbid
-    action: "net:*:api.example.com/admin/*"
-    reason: "no admin"
-"#;
-        let verdict = check(yaml, "net:POST:api.example.com/admin/delete").unwrap();
-        assert_eq!(
-            verdict,
-            CheckVerdict::Forbid("net:*:api.example.com/admin/*".to_string())
-        );
-    }
-
-    #[test]
-    fn test_check_no_match() {
-        let yaml = r#"
-name: test
-rules:
-  - effect: permit
-    action: "net:*:api.example.com/*"
-    type: idempotent
-"#;
-        let verdict = check(yaml, "net:GET:api.other.com/foo").unwrap();
-        assert_eq!(verdict, CheckVerdict::NoMatch);
-    }
-
-    #[test]
-    fn test_validate_bundled_templates() {
-        // All bundled templates should validate without warnings.
-        // Walk the embedded dir directly to get the YAML contents.
-        fn check_dir(dir: &Dir) {
-            for file in dir.files() {
-                if file.path().extension().and_then(|e| e.to_str()) != Some("yaml") {
-                    continue;
-                }
-                let contents = file.contents_utf8().unwrap();
-                let result = validate(contents)
-                    .unwrap_or_else(|e| panic!("failed to validate {:?}: {}", file.path(), e));
-                assert!(
-                    result.warnings.is_empty(),
-                    "bundled template {:?} has warnings: {:?}",
-                    file.path(),
-                    result.warnings
-                );
-            }
-            for subdir in dir.dirs() {
-                check_dir(subdir);
-            }
-        }
-        check_dir(&BUNDLED_TEMPLATES);
     }
 }

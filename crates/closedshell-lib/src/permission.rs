@@ -125,38 +125,31 @@ impl PermissionTree {
         len_before - rules.len()
     }
 
-    /// Load rules from a YAML template string.
-    pub fn load_template(&self, yaml_str: &str) -> Result<()> {
-        let tpl: Template =
-            serde_yaml::from_str(yaml_str).context("failed to parse permission template")?;
-        let source = format!("template:{}", tpl.name);
+    /// Load rules from a CSP template string.
+    pub fn load_template(&self, csp_str: &str) -> Result<()> {
+        let policy =
+            crate::template::parse(csp_str).context("failed to parse permission template")?;
+        let source = format!("template:{}", policy.name);
         let mut rules = self.rules.write().unwrap();
-        for (i, tr) in tpl.rules.into_iter().enumerate() {
-            let effect = match tr.effect.as_str() {
-                "permit" => Effect::Permit,
-                "forbid" => Effect::Forbid,
-                other => anyhow::bail!("unknown effect: {}", other),
+        for (i, stmt) in policy.statements.into_iter().enumerate() {
+            let effect = match stmt.effect {
+                crate::template::Effect::Permit => Effect::Permit,
+                crate::template::Effect::Forbid => Effect::Forbid,
             };
             let rule_type = if effect == Effect::Forbid {
                 None
             } else {
-                match tr.rule_type.as_deref() {
-                    Some("idempotent") | None => Some(RuleType::Idempotent),
-                    Some("one-shot") | Some("oneshot") => {
-                        Some(RuleType::OneShot { consumed: false })
-                    }
-                    Some(other) => anyhow::bail!("unknown rule type: {}", other),
-                }
+                Some(RuleType::Idempotent)
             };
             rules.push(Rule {
                 id: format!("{}:{}", source, i),
                 effect,
-                action: tr.action,
+                action: stmt.action,
                 rule_type,
                 approved_by: None,
                 source: Some(source.clone()),
                 plan_id: None,
-                reason: tr.reason,
+                reason: stmt.reason,
                 expires: None,
             });
         }
@@ -258,25 +251,6 @@ fn promote_stars(pattern: &str) -> String {
         }
     }
     result
-}
-
-// --- YAML template deserialization ---
-
-#[derive(Deserialize)]
-struct Template {
-    name: String,
-    #[allow(dead_code)] // present in YAML schema, consumed by serde
-    description: Option<String>,
-    rules: Vec<TemplateRule>,
-}
-
-#[derive(Deserialize)]
-struct TemplateRule {
-    effect: String,
-    action: String,
-    #[serde(rename = "type")]
-    rule_type: Option<String>,
-    reason: Option<String>,
 }
 
 // --- Tests ---
@@ -449,20 +423,17 @@ mod tests {
     fn two_templates_forbid_survives() {
         let tree = PermissionTree::new();
         let tpl1 = r#"
-name: restrict-prod
-description: "Block prod deletes"
-rules:
-  - effect: forbid
-    action: "aws[profile=prod]:*:Delete*"
-    reason: "no production deletes"
+@name("restrict-prod")
+@description("Block prod deletes")
+
+forbid (action == "aws[profile=prod]:*:Delete*")
+  reason("no production deletes");
 "#;
         let tpl2 = r#"
-name: allow-s3
-description: "Allow S3 access"
-rules:
-  - effect: permit
-    action: "aws[profile=prod]:s3:*"
-    type: idempotent
+@name("allow-s3")
+@description("Allow S3 access")
+
+permit (action == "aws[profile=prod]:s3:*");
 "#;
         tree.load_template(tpl1).unwrap();
         tree.load_template(tpl2).unwrap();

@@ -1,0 +1,6 @@
+@name("github-full")
+@description("Allow GitHub API and git operations")
+
+permit (action == "net:*:api.github.com/*");
+permit (action == "net:*:github.com/*");
+permit (action == "net:*:uploads.github.com/*");

@@ -1,6 +1,0 @@
-name: openai-full
-description: "Allow all OpenAI API endpoints (GPT, Codex CLI, assistants, files, etc.)"
-rules:
-  - effect: permit
-    action: "net:*:api.openai.com/*"
-    type: idempotent

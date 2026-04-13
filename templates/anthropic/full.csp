@@ -1,0 +1,21 @@
+@name("anthropic-full")
+@description("Allow all Anthropic API, MCP proxy, and Claude Code infra endpoints")
+
+// Core API
+permit (action == "net:*:api.anthropic.com/*");
+
+// MCP proxy
+permit (action == "net:*:mcp-proxy.anthropic.com/*");
+
+// Claude Code downloads + updates
+permit (action == "net:*:downloads.claude.ai/*");
+permit (action == "net:*:storage.googleapis.com/claude-code-*");
+
+// OAuth token refresh
+permit (action == "net:*:platform.claude.com/*");
+
+// Telemetry
+permit (action == "net:*:http-intake.logs.*.datadoghq.com/*");
+
+// MCP server installs (npm)
+permit (action == "net:*:registry.npmjs.org/*");

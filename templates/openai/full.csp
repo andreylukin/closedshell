@@ -1,0 +1,4 @@
+@name("openai-full")
+@description("Allow all OpenAI API endpoints (GPT, Codex CLI, assistants, files, etc.)")
+
+permit (action == "net:*:api.openai.com/*");

@@ -1,0 +1,4 @@
+@name("exa-readonly")
+@description("Allow read-only Exa API access (GET only)")
+
+permit (action == "net:GET:api.exa.ai/*");
