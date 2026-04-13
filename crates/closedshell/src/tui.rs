@@ -159,8 +159,12 @@ impl App {
     fn new(session_id: String) -> Self {
         let socket_path = PathBuf::from(format!("/private/tmp/closedshell-{}/cs.sock", session_id));
 
-        let log_name = format!("closedshell-{}.log", session_id);
-        let log_path = PathBuf::from(&log_name);
+        // Default log path: ~/.closedshell/logs/<encoded-cwd>/<session>.log
+        let log_path = {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let log_dir = closedshell_lib::config::log_dir_for_cwd(&cwd);
+            log_dir.join(format!("closedshell-{}.log", session_id))
+        };
 
         Self {
             session_id,
@@ -942,7 +946,8 @@ pub fn run_session_list(db: &closedshell_lib::db::SessionDb) -> Result<()> {
                         // Drop the terminal, run session TUI, re-enter our TUI on return
                         disable_raw_mode()?;
                         crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                        let _ = run(&s.id);
+                        let db_log = PathBuf::from(&s.log_path);
+                        let _ = run(&s.id, Some(&db_log));
                         enable_raw_mode()?;
                         crossterm::execute!(terminal.backend_mut(), EnterAlternateScreen)?;
                     }
@@ -967,13 +972,17 @@ pub fn run_session_list(db: &closedshell_lib::db::SessionDb) -> Result<()> {
 
 // ── Entry point ─────────────────────────────────────────────────────────────
 
-pub fn run(session_id: &str) -> Result<()> {
+pub fn run(session_id: &str, db_log_path: Option<&std::path::Path>) -> Result<()> {
     let mut app = App::new(session_id.to_string());
 
-    // Try to find the log file in CWD
+    // Use DB-provided log path if available, otherwise use default
+    if let Some(path) = db_log_path {
+        app.log_path = path.to_path_buf();
+    }
+
     if !app.log_path.exists() {
         eprintln!(
-            "[closedshell] warning: log file {} not found in current directory",
+            "[closedshell] warning: log file {} not found",
             app.log_path.display()
         );
     }

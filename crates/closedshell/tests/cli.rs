@@ -8,6 +8,22 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Find closedshell log files in a directory.
+fn find_log_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    if !dir.exists() {
+        return vec![];
+    }
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with("closedshell-") && name.ends_with(".log")
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
 /// Path to the built binary. `cargo test` builds it automatically via the
 /// [[bin]] target in this crate.
 fn closedshell_bin() -> PathBuf {
@@ -25,12 +41,14 @@ fn run_closedshell(args: &[&str]) -> (i32, String, String) {
 }
 
 fn run_closedshell_in(args: &[&str], dir: std::path::PathBuf) -> (i32, String, String) {
-    // Each test gets its own SQLite DB to avoid contention
+    // Each test gets its own SQLite DB and log dir to avoid contention and leaking files
     let db_path = dir.join("test-sessions.db");
+    let log_dir = dir.join("test-logs");
     let output = Command::new(closedshell_bin())
         .args(args)
         .current_dir(&dir)
         .env("CLOSEDSHELL_DB", &db_path)
+        .env("CLOSEDSHELL_LOG_DIR", &log_dir)
         .output()
         .expect("failed to run closedshell binary");
     (
@@ -77,27 +95,21 @@ fn no_motd_flag_suppresses_banner() {
 #[test]
 fn audit_log_is_created() {
     let tmpdir = tempfile::tempdir().unwrap();
+    let log_dir = tmpdir.path().join("logs");
     let output = Command::new(closedshell_bin())
         .args(["--yolo", "echo", "audit-test"])
         .current_dir(tmpdir.path())
         .env("CLOSEDSHELL_DB", tmpdir.path().join("test.db"))
+        .env("CLOSEDSHELL_LOG_DIR", &log_dir)
         .output()
         .expect("failed to run closedshell");
     assert_eq!(output.status.code().unwrap_or(-1), 0);
 
-    // Find the audit log file
-    let logs: Vec<_> = std::fs::read_dir(tmpdir.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name().to_string_lossy().starts_with("closedshell-")
-                && e.file_name().to_string_lossy().ends_with(".log")
-        })
-        .collect();
+    let logs = find_log_files(&log_dir);
 
     assert_eq!(logs.len(), 1, "expected one audit log file");
 
-    let log_content = std::fs::read_to_string(logs[0].path()).unwrap();
+    let log_content = std::fs::read_to_string(&logs[0]).unwrap();
     let events: Vec<serde_json::Value> = log_content
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -139,10 +151,12 @@ fn concurrent_sessions_get_unique_ids() {
             thread::spawn(move || {
                 let tmpdir = tempfile::tempdir().unwrap();
                 let db = tmpdir.path().join(format!("test-{}.db", i));
+                let log_dir = tmpdir.path().join("logs");
                 let output = Command::new(closedshell_bin())
                     .args(["--yolo", "env"])
                     .current_dir(std::env::temp_dir())
                     .env("CLOSEDSHELL_DB", &db)
+                    .env("CLOSEDSHELL_LOG_DIR", &log_dir)
                     .output()
                     .expect("failed to run closedshell");
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -201,14 +215,18 @@ fn concurrent_sessions_create_separate_audit_logs() {
 
     let tmpdir = tempfile::tempdir().unwrap();
 
+    let log_dir = tmpdir.path().join("logs");
+
     let handles: Vec<_> = (0..3)
         .map(|i| {
             let dir = tmpdir.path().to_path_buf();
+            let logs = log_dir.clone();
             thread::spawn(move || {
                 let output = std::process::Command::new(closedshell_bin())
                     .args(["--yolo", "echo", "audit-multi"])
                     .current_dir(&dir)
                     .env("CLOSEDSHELL_DB", dir.join(format!("test-{}.db", i)))
+                    .env("CLOSEDSHELL_LOG_DIR", &logs)
                     .output()
                     .expect("failed to run closedshell");
                 assert_eq!(output.status.code().unwrap_or(-1), 0);
@@ -220,14 +238,7 @@ fn concurrent_sessions_create_separate_audit_logs() {
         h.join().unwrap();
     }
 
-    let logs: Vec<_> = std::fs::read_dir(tmpdir.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            name.starts_with("closedshell-") && name.ends_with(".log")
-        })
-        .collect();
+    let logs = find_log_files(&log_dir);
 
     assert_eq!(
         logs.len(),
@@ -238,7 +249,7 @@ fn concurrent_sessions_create_separate_audit_logs() {
 
     // Each log should have its own session_start and session_end
     for log in &logs {
-        let content = std::fs::read_to_string(log.path()).unwrap();
+        let content = std::fs::read_to_string(log).unwrap();
         let events: Vec<serde_json::Value> = content
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
@@ -260,7 +271,7 @@ fn concurrent_sessions_create_separate_audit_logs() {
     let session_ids: std::collections::HashSet<String> = logs
         .iter()
         .map(|log| {
-            let content = std::fs::read_to_string(log.path()).unwrap();
+            let content = std::fs::read_to_string(log).unwrap();
             let event: serde_json::Value =
                 serde_json::from_str(content.lines().next().unwrap()).unwrap();
             event["session"].as_str().unwrap().to_string()

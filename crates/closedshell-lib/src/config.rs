@@ -122,6 +122,32 @@ fn dirs_config_path() -> std::path::PathBuf {
         .join("config.yaml")
 }
 
+/// Compute the log directory for a given working directory.
+///
+/// If `CLOSEDSHELL_LOG_DIR` is set, returns that path directly (for testing).
+/// Otherwise returns `~/.closedshell/logs/<encoded-cwd>/` where the cwd is
+/// encoded by replacing `/` with `_` and stripping the leading `_`.
+/// Example: `/Users/alice/repos/myproject` → `Users_alice_repos_myproject`
+///
+/// The path is canonicalized to resolve symlinks (e.g., `/var` → `/private/var`
+/// on macOS) so the same physical directory always maps to the same log dir.
+pub fn log_dir_for_cwd(cwd: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("CLOSEDSHELL_LOG_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let encoded = canonical
+        .to_string_lossy()
+        .replace('/', "_")
+        .trim_start_matches('_')
+        .to_string();
+    std::path::PathBuf::from(home)
+        .join(".closedshell")
+        .join("logs")
+        .join(encoded)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +218,34 @@ mod tests {
         config.resolve_paths();
         let home = std::env::var("HOME").unwrap();
         assert!(config.sandbox.templates_dir.starts_with(&home));
+    }
+
+    #[test]
+    fn test_log_dir_for_cwd() {
+        let home = std::env::var("HOME").unwrap();
+        let dir = log_dir_for_cwd(std::path::Path::new("/Users/alice/repos/myproject"));
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from(&home).join(".closedshell/logs/Users_alice_repos_myproject")
+        );
+    }
+
+    #[test]
+    fn test_log_dir_for_root() {
+        let home = std::env::var("HOME").unwrap();
+        let dir = log_dir_for_cwd(std::path::Path::new("/"));
+        assert_eq!(
+            dir,
+            std::path::PathBuf::from(&home).join(".closedshell/logs/")
+        );
+    }
+
+    #[test]
+    fn test_log_dir_resolves_symlinks() {
+        // /var → /private/var on macOS; both should produce the same log dir
+        let via_var = log_dir_for_cwd(std::path::Path::new("/var"));
+        let via_private = log_dir_for_cwd(std::path::Path::new("/private/var"));
+        assert_eq!(via_var, via_private);
     }
 
     #[test]

@@ -383,7 +383,21 @@ async fn main() -> anyhow::Result<()> {
 
     // TUI mode: attach to an existing session
     if let Some(ref session_id) = cli.tui {
-        return tui::run(session_id);
+        // Look up log path from DB if available
+        let db_path = if let Ok(p) = std::env::var("CLOSEDSHELL_DB") {
+            PathBuf::from(p)
+        } else {
+            let home = PathBuf::from(std::env::var("HOME").unwrap());
+            home.join(".closedshell").join("sessions.db")
+        };
+        let log_path = if db_path.exists() {
+            let db = SessionDb::open(&db_path)?;
+            db.find_session_by_id(session_id)?
+                .map(|s| PathBuf::from(s.log_path))
+        } else {
+            None
+        };
+        return tui::run(session_id, log_path.as_deref());
     }
 
     // No-args mode: show session list
@@ -505,7 +519,9 @@ async fn main() -> anyhow::Result<()> {
     std::fs::write(&ca_pem_path, &trust_store)?;
 
     // 5. Start MITM proxy
-    let audit = Arc::new(AuditLog::open(&std::env::current_dir()?, &session_id)?);
+    let log_dir = config::log_dir_for_cwd(&std::env::current_dir()?);
+    std::fs::create_dir_all(&log_dir)?;
+    let audit = Arc::new(AuditLog::open(&log_dir, &session_id)?);
 
     // Load templates into tree (on top of any restored rules)
     if !cli.template.is_empty() {
