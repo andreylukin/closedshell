@@ -8,6 +8,10 @@
 
 > **macOS only.** Uses macOS Seatbelt for sandboxing. Linux contributions welcome.
 
+<p align="center">
+  <img src="demo/demo.gif" alt="ClosedShell demo — TUI permission approval flow" width="800">
+</p>
+
 ---
 
 ## The Problem
