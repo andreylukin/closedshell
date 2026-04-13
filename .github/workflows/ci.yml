@@ -32,15 +32,5 @@ jobs:
       - name: Audit
         run: cargo audit
 
-  macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-
-      - name: Test
-        run: cargo test
+  # macOS tests run only in the release workflow (on tags) to save runner minutes.
+  # macOS runners cost 10x Linux — running them on every push/PR is prohibitively expensive.
