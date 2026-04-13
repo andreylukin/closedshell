@@ -959,31 +959,6 @@ fn colorize_pattern(pattern: &str) -> Vec<Span<'static>> {
             ];
         }
     }
-    // provider[qualifier]:service:op (aws, gcp, azure, k8s)
-    for prefix in &["aws", "gcp", "azure", "k8s"] {
-        if let Some(after) = pattern.strip_prefix(prefix) {
-            if after.starts_with(':') || after.starts_with('[') {
-                // Find service:op split
-                let qualifier_end = if after.starts_with('[') {
-                    after.find(']').map(|i| i + 1).unwrap_or(0)
-                } else {
-                    0
-                };
-                let service_part = &after[qualifier_end..];
-                let qualifier = &after[..qualifier_end];
-                return vec![
-                    Span::styled(
-                        prefix.to_string(),
-                        Style::default()
-                            .fg(Color::Blue)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(qualifier.to_string(), Style::default().fg(Color::DarkGray)),
-                    Span::styled(service_part.to_string(), Style::default().fg(Color::White)),
-                ];
-            }
-        }
-    }
     // Fallback: plain white
     vec![Span::styled(
         pattern.to_string(),
