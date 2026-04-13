@@ -8,8 +8,7 @@ Transparent MITM proxy. Session-scoped CA cert injected into sandbox at creation
 
 - Intercept all outbound HTTPS from sandbox
 - Parse cloud provider API calls into structured actions
-- Check action against permission tree (forbid → permit → implicit ask → deny). See [permission-tree.md § Evaluation Algorithm](permission-tree.md#evaluation-algorithm).
-- For unknown actions: submit implicit ask to judge
+- Check action against permission tree (forbid → permit → block for human approval). See [permission-tree.md § Evaluation Algorithm](permission-tree.md#evaluation-algorithm).
 - Forward approved requests with credentials as-is (passthrough)
 - Log all decisions to audit log (see [architecture.md § Audit Log](architecture.md#audit-log))
 - Support WebSocket/streaming (see [§ Streaming and WebSocket](#streaming-and-websocket))
@@ -39,7 +38,7 @@ Parsers are pluggable. Unknown APIs fall back to `net:<METHOD>:<host>/<path>`.
 
 ## Baked-in Risk Taxonomy
 
-Safe/moderate/dangerous classification per provider, sourced from public IAM/RBAC docs. Embedded in binary, updatable via config override. Used for both judge input and permission tree schema validation.
+Safe/moderate/dangerous classification per provider, sourced from public IAM/RBAC docs. Embedded in binary, updatable via config override. Used for TUI risk display and permission tree schema validation.
 
 See [permission-tree.md § Schema](permission-tree.md#schema-compile-time-validation) for the full taxonomy format.
 
@@ -65,7 +64,7 @@ The proxy makes the allow/deny decision on the **initial request only**, then be
 
 ### Revocation during a stream
 
-If a permission is revoked (plan revoked, one-shot consumed by another request) while a streaming connection or WebSocket is already open, **the existing connection is not interrupted**. The revocation takes effect on the next connection attempt.
+If a permission is revoked (one-shot consumed by another request) while a streaming connection or WebSocket is already open, **the existing connection is not interrupted**. The revocation takes effect on the next connection attempt.
 
 This is an acceptable gap. The alternative — tracking all open connections per rule and tearing them down on revocation — adds significant complexity for marginal security benefit. Long-lived connections are rare in the cloud API use case (most are short request/response), and WebSocket connections get a fresh check on reconnect.
 
@@ -83,9 +82,9 @@ X-ClosedShell-Denied: true
 {
   "error": "denied",
   "action": "aws[profile=prod]:ec2:TerminateInstances",
-  "reason": "session policy: no production terminates",
+  "reason": "forbidden by rule",
   "risk_tier": "dangerous",
-  "hint": "ask plan \"describe your goal\""
+  "hint": "pending human review in TUI"
 }
 ```
 

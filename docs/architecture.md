@@ -574,10 +574,8 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | T8 | Glob `aws[profile=*]:s3:List*` matches `aws[profile=dev]:s3:ListBuckets` | Match |
 | T9 | Glob `aws[profile=dev]:s3:List*` does NOT match `aws[profile=prod]:s3:ListBuckets` | No match |
 | T10 | Template merge: two templates loaded, forbid from first cannot be removed by second | Forbid persists |
-| T11 | Plan revocation: revoke plan-id removes all rules with that plan_id | All child rules gone |
-| T12 | Forbid `file:read:/Users/*/.ssh/*`, evaluate `file:read:/Users/alice/.ssh/id_rsa` | DENY |
-| T13 | Permit `file:write:/Users/alice/repos/*`, evaluate `file:write:/Users/alice/repos/foo.txt` | ALLOW |
-| T14 | No permit for `file:write:/etc/passwd`, evaluate | DENY (default deny) |
+| T11 | Expired idempotent rule → evaluate action | DENY (expired rule skipped) |
+| T12 | Two templates loaded, second adds permit overlapping first's forbid | Forbid wins (forbid-overrides-permit) |
 
 ### End-to-End (requires all sections)
 
