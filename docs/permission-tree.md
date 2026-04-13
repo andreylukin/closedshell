@@ -331,7 +331,7 @@ Built-in templates are compiled into the binary from the `templates/` directory.
 Templates are specified at session creation and merged in order:
 
 ```
-closedshell \
+cs \
   --template aws-debug \
   --template github-readonly \
   -- claude

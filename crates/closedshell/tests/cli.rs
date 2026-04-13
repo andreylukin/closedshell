@@ -28,10 +28,10 @@ fn find_log_files(dir: &std::path::Path) -> Vec<PathBuf> {
 /// [[bin]] target in this crate.
 fn closedshell_bin() -> PathBuf {
     // cargo sets this env var during `cargo test` for integration tests
-    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_closedshell"));
+    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_cs"));
     // Fallback: if the env var gives us the right path, use it directly
     if !path.exists() {
-        path = PathBuf::from("target/debug/closedshell");
+        path = PathBuf::from("target/debug/cs");
     }
     path
 }

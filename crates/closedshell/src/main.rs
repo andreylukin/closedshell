@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Parser)]
-#[command(name = "closedshell", about = "Sandbox for AI agents")]
+#[command(name = "cs", about = "Sandbox for AI agents")]
 struct Cli {
     /// Permission template to load (repeatable)
     #[arg(long)]

@@ -10,7 +10,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "closedshell"
+name = "cs"
 path = "src/main.rs"
 
 [dependencies]

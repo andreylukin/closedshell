@@ -15,11 +15,11 @@ class Closedshell < Formula
   end
 
   def install
-    bin.install "closedshell"
-    bin.install_symlink "closedshell" => "cs"
+    bin.install "cs"
+    bin.install_symlink "cs" => "closedshell"
   end
 
   test do
-    assert_match "closedshell", shell_output("#{bin}/closedshell --help")
+    assert_match "cs", shell_output("#{bin}/cs --help")
   end
 end

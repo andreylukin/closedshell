@@ -15,7 +15,7 @@ Everything that makes the sandbox work end-to-end. This is one integrated delive
 - Provider parsers (generic `net:METHOD:host/path` first, then AWS/GCP/etc.) — see [proxy.md](proxy.md)
 - Environment variable passthrough for credentials — see [proxy.md](proxy.md)
 - Tree lookup on every request — unknown = block for human approval
-- `closedshell <cmd>` lifecycle + session persistence (SQLite)
+- `cs <cmd>` lifecycle + session persistence (SQLite)
 
 **Deliverable:** A locked sandbox where all network traffic is intercepted, parsed, and checked against the permission tree. End-to-end from `closedshell claude` to denied/approved request.
 

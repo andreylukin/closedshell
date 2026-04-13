@@ -108,7 +108,7 @@ The MITM proxy needs sandboxed processes to trust its dynamically generated leaf
 ## Session Lifecycle
 
 ```
-closedshell <agent-command>
+cs <agent-command>
 
 1. Lookup working directory in sessions.db → resume or create session
 2. Load persistent CA from ~/.closedshell/ca.pem (or generate + trust on first run)
@@ -134,7 +134,7 @@ closedshell <agent-command>
 
 ## Session Management
 
-Sessions are identified by **working directory**. When `closedshell <cmd>` runs, it looks up the working directory in the session database. If a session exists for that directory, its permission tree is restored. If not, a new session is created.
+Sessions are identified by **working directory**. When `cs <cmd>` runs, it looks up the working directory in the session database. If a session exists for that directory, its permission tree is restored. If not, a new session is created.
 
 This maps to how coding agents like Pi work — sessions are per-project, and resuming a session in the same directory should feel like picking up where you left off, permissions included.
 
@@ -175,7 +175,7 @@ CREATE TABLE rules (
 ### Lifecycle
 
 ```
-closedshell pi                         # start or resume
+cs pi                                  # start or resume
   1. Hash $PWD → lookup in sessions.db
   2. Existing session found?
      YES → restore permission tree from rules table, reuse session ID, append to existing log
@@ -194,21 +194,21 @@ closedshell pi                         # start or resume
 Three modes based on arguments:
 
 ```
-closedshell                                     # TUI — session manager
-closedshell 8f3a                                # TUI — jump to specific session
-closedshell pi                                  # run agent in sandbox
-closedshell --task "fix bug" pi                 # with session task
-closedshell --template aws-debug pi             # with templates
+cs                                              # TUI — session manager
+cs 8f3a                                         # TUI — jump to specific session
+cs pi                                           # run agent in sandbox
+cs --task "fix bug" pi                          # with session task
+cs --template aws-debug pi                      # with templates
 ```
 
-Alias: `cs` (configured by user, not shipped).
+The full name `closedshell` is available as a symlink (installed by Homebrew or `make install`).
 
 **How disambiguation works:** if the argument matches a known session ID prefix, open the TUI for that session. Otherwise, treat it as a command to sandbox. Session IDs are short hex strings — no collision with real commands.
 
 ### Sandbox flags
 
 ```
-closedshell [flags] <command> [args...]
+cs [flags] <command> [args...]
 ```
 
 | Flag | Description |
@@ -316,7 +316,7 @@ Forbid rules from org baseline or templates cannot be removed via edit — they'
 
 ### Crash recovery
 
-On startup, check for rows where `status = "running"` but `pid` is dead. Mark them `"stopped"`. Next `closedshell <cmd>` in that directory resumes normally.
+On startup, check for rows where `status = "running"` but `pid` is dead. Mark them `"stopped"`. Next `cs <cmd>` in that directory resumes normally.
 
 ### One-shot rules across sessions
 
@@ -326,7 +326,7 @@ One-shot rules that were consumed are deleted from the `rules` table on persist.
 
 ## YOLO Mode
 
-`yolo: true` in config or `closedshell --yolo pi` on the command line. The proxy still intercepts and parses every request, but **never blocks**. All decisions are logged as `allow (yolo)`. Forbid rules are still evaluated and logged as `would_deny (yolo)` but don't block.
+`yolo: true` in config or `cs --yolo pi` on the command line. The proxy still intercepts and parses every request, but **never blocks**. All decisions are logged as `allow (yolo)`. Forbid rules are still evaluated and logged as `would_deny (yolo)` but don't block.
 
 Use case: dev environments where you want visibility into what the agent is doing without friction. You can review the audit log after the fact and use it to build templates for production sessions.
 
@@ -493,7 +493,7 @@ No special crate for seatbelt — the profile is a generated `.sb` file passed t
 ## Binaries
 
 ```
-closedshell    (host-side daemon + proxy + CLI + TUI)
+cs             (host-side daemon + proxy + CLI + TUI)
 ```
 
 ---
