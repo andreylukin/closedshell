@@ -354,6 +354,8 @@ pub struct TemplateInfo {
     pub name: String,
     pub description: String,
     pub path: PathBuf,
+    /// The key to pass to `resolve()` — file-relative path without `.csp` extension.
+    pub resolve_key: String,
     pub rule_count: usize,
     pub source: TemplateSource,
 }
@@ -621,12 +623,15 @@ fn collect_bundled_dir(dir: &Dir, out: &mut BTreeMap<String, TemplateInfo>) {
         let Ok(policy) = parse(contents) else {
             continue;
         };
+        // resolve_key is the file path without .csp extension (e.g., "anthropic/full")
+        let resolve_key = file.path().with_extension("").to_string_lossy().to_string();
         out.insert(
             policy.name.clone(),
             TemplateInfo {
                 name: policy.name,
                 description: policy.description,
                 path: PathBuf::from("(built-in)"),
+                resolve_key,
                 rule_count: policy.statements.len(),
                 source: TemplateSource::BuiltIn,
             },
@@ -661,6 +666,7 @@ fn parse_template_info(path: &Path) -> Result<TemplateInfo> {
     Ok(TemplateInfo {
         name: policy.name,
         description: policy.description,
+        resolve_key: path.display().to_string(),
         path: path.to_path_buf(),
         rule_count: policy.statements.len(),
         source: TemplateSource::User,

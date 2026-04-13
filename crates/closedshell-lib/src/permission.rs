@@ -198,8 +198,13 @@ impl Default for PermissionTree {
 impl DecisionMaker for PermissionTree {
     fn evaluate(&self, action: &Action) -> Verdict {
         match self.evaluate(&action.canonical()) {
-            TreeVerdict::Allow => Verdict::Allow,
-            TreeVerdict::Deny { reason } => Verdict::Deny { reason },
+            TreeVerdict::Allow => Verdict::Allow {
+                decided_by: "tree".into(),
+            },
+            TreeVerdict::Deny { reason } => Verdict::Deny {
+                reason,
+                decided_by: "tree".into(),
+            },
         }
     }
 }
@@ -601,9 +606,10 @@ permit (action == "aws[profile=prod]:s3:*");
             service: "s3".to_string(),
             operation: "ListBuckets".to_string(),
             raw: "aws:s3:ListBuckets".to_string(),
+            net_form: "net:GET:s3.amazonaws.com/".to_string(),
         };
 
         let verdict = DecisionMaker::evaluate(&tree, &action);
-        assert!(matches!(verdict, Verdict::Allow));
+        assert!(matches!(verdict, Verdict::Allow { .. }));
     }
 }

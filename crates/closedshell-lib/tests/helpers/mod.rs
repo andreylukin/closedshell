@@ -88,9 +88,12 @@ impl DecisionMaker for DenyContaining {
         if action.canonical().contains(&self.0) {
             Verdict::Deny {
                 reason: format!("blocked: {}", self.0),
+                decided_by: "test".into(),
             }
         } else {
-            Verdict::Allow
+            Verdict::Allow {
+                decided_by: "test".into(),
+            }
         }
     }
 }
@@ -104,6 +107,7 @@ impl DecisionMaker for LargeDenyDecider {
     fn evaluate(&self, _action: &Action) -> Verdict {
         Verdict::Deny {
             reason: "x".repeat(self.reason_size),
+            decided_by: "test".into(),
         }
     }
 }

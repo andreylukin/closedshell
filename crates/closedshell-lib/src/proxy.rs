@@ -24,8 +24,8 @@ use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 
 /// The result of evaluating an action against a policy.
 pub enum Verdict {
-    Allow,
-    Deny { reason: String },
+    Allow { decided_by: String },
+    Deny { reason: String, decided_by: String },
 }
 
 /// Decides whether an intercepted action should be forwarded or blocked.
@@ -42,7 +42,9 @@ pub struct YoloDecider;
 
 impl DecisionMaker for YoloDecider {
     fn evaluate(&self, _action: &Action) -> Verdict {
-        Verdict::Allow
+        Verdict::Allow {
+            decided_by: "yolo".into(),
+        }
     }
 }
 
@@ -56,11 +58,14 @@ impl DecisionMaker for PatternDecider {
         let canonical = action.canonical();
         for pattern in &self.allow_patterns {
             if glob_match::glob_match(pattern, &canonical) {
-                return Verdict::Allow;
+                return Verdict::Allow {
+                    decided_by: "pattern".into(),
+                };
             }
         }
         Verdict::Deny {
             reason: format!("no allow rule matched: {}", canonical),
+            decided_by: "pattern".into(),
         }
     }
 }
@@ -80,7 +85,7 @@ pub struct EnforcingDecider {
 
 impl EnforcingDecider {
     /// Block waiting for human approval via TUI.
-    async fn await_human_approval(&self, canonical: &str) -> Verdict {
+    async fn await_human_approval(&self, canonical: &str, net_form: &str) -> Verdict {
         let start = std::time::Instant::now();
         let risk_tier = risk::classify_risk(canonical);
 
@@ -99,7 +104,7 @@ impl EnforcingDecider {
                 self.tree.add_rule(crate::permission::Rule {
                     id: format!("human-{}", chrono::Utc::now().timestamp_millis()),
                     effect: crate::permission::Effect::Permit,
-                    action: canonical.to_string(),
+                    action: net_form.to_string(),
                     rule_type: Some(crate::permission::RuleType::Idempotent),
                     approved_by: Some("human".into()),
                     source: Some("human-approval".into()),
@@ -108,7 +113,9 @@ impl EnforcingDecider {
                     expires: None,
                 });
                 self.state.record_decision(canonical, "allow", "human");
-                Verdict::Allow
+                Verdict::Allow {
+                    decided_by: "human".into(),
+                }
             }
             Ok(ApprovalVerdict::Denied { reason }) => {
                 self.state.record_denial(DenialInfo {
@@ -119,7 +126,10 @@ impl EnforcingDecider {
                     denied_by: "human".to_string(),
                 });
                 self.state.record_decision(canonical, "deny", "human");
-                Verdict::Deny { reason }
+                Verdict::Deny {
+                    reason,
+                    decided_by: "human".into(),
+                }
             }
             Err(_) => {
                 let reason = "approval timed out".to_string();
@@ -132,13 +142,16 @@ impl EnforcingDecider {
                 });
                 self.state
                     .record_decision(canonical, "deny", "approval-timeout");
-                Verdict::Deny { reason }
+                Verdict::Deny {
+                    reason,
+                    decided_by: "timeout".into(),
+                }
             }
         };
 
         let wait_ms = start.elapsed().as_millis() as u64;
         let verdict_str = match &verdict {
-            Verdict::Allow => "approved",
+            Verdict::Allow { .. } => "approved",
             Verdict::Deny { .. } => "denied",
         };
         let _ = self.audit.log(AuditPayload::HumanApproval {
@@ -163,7 +176,9 @@ impl DecisionMaker for EnforcingDecider {
         match self.tree.evaluate(&canonical) {
             crate::permission::TreeVerdict::Allow => {
                 self.state.record_decision(&canonical, "allow", "tree");
-                Verdict::Allow
+                Verdict::Allow {
+                    decided_by: "tree".into(),
+                }
             }
             crate::permission::TreeVerdict::Deny { reason } => {
                 // Explicit forbid → hard deny, no approval queue
@@ -176,13 +191,17 @@ impl DecisionMaker for EnforcingDecider {
                         denied_by: "forbid".to_string(),
                     });
                     self.state.record_decision(&canonical, "deny", "forbid");
-                    return Verdict::Deny { reason };
+                    return Verdict::Deny {
+                        reason,
+                        decided_by: "forbid".into(),
+                    };
                 }
 
                 // No match → block and queue for human approval
+                let net_form = &action.net_form;
                 tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current()
-                        .block_on(self.await_human_approval(&canonical))
+                        .block_on(self.await_human_approval(&canonical, net_form))
                 })
             }
         }
@@ -395,15 +414,19 @@ async fn handle_client(
         let verdict = decider.evaluate(&action);
         stats.total_decisions.fetch_add(1, Ordering::Relaxed);
 
-        let (result_str, reason) = match &verdict {
-            Verdict::Allow => ("allow".to_string(), None),
-            Verdict::Deny { reason } => (format!("deny: {}", reason), Some(reason.clone())),
+        let (result_str, reason, decided_by) = match &verdict {
+            Verdict::Allow { decided_by } => ("allow".to_string(), None, decided_by.clone()),
+            Verdict::Deny { reason, decided_by } => (
+                format!("deny: {}", reason),
+                Some(reason.clone()),
+                decided_by.clone(),
+            ),
         };
 
         let _ = audit.log(AuditPayload::Decision {
             action: action.canonical(),
             result: result_str,
-            decided_by: "decider".into(),
+            decided_by,
             reason,
             latency_ms: 0,
             request: RequestMeta {
@@ -415,7 +438,7 @@ async fn handle_client(
 
         // On deny: return structured 403 with denial details in body and headers.
         // Agents can parse the JSON body, read the headers, or just log the message field.
-        if let Verdict::Deny { reason } = &verdict {
+        if let Verdict::Deny { reason, .. } = &verdict {
             let canonical = action.canonical();
 
             // Pull denial info from decider state (JudgeDecider tracks it),

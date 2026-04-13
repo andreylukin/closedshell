@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Tabs},
 };
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write as IoWrite};
@@ -111,6 +111,12 @@ struct App {
     search_query: String,
     search_active: bool,
 
+    // Activity filter: 0=All, 1=Allow, 2=Deny
+    activity_filter: u8,
+
+    // Help overlay
+    show_help: bool,
+
     // File tailing
     log_offset: u64,
 }
@@ -180,6 +186,8 @@ impl App {
             session_ended: false,
             search_query: String::new(),
             search_active: false,
+            activity_filter: 0,
+            show_help: false,
             log_offset: 0,
         }
     }
@@ -409,12 +417,145 @@ fn draw(f: &mut Frame, app: &App) {
 
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(size);
 
     draw_header(f, app, outer[0]);
-
     draw_right_panel(f, app, outer[1]);
+
+    // Context-sensitive footer keybinding hints
+    let hints: &[(&str, &str)] = if app.search_active {
+        &[("Esc", "cancel"), ("Enter", "confirm")]
+    } else {
+        match app.active_tab {
+            0 => &[
+                ("/", "search"),
+                ("f", "filter"),
+                ("j/k", "scroll"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
+            1 => &[
+                ("j/k", "select"),
+                ("d", "delete"),
+                ("e", "edit"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
+            2 => &[
+                ("j/k", "select"),
+                ("y", "approve"),
+                ("n", "deny"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
+            _ => &[("q", "quit")],
+        }
+    };
+    draw_footer(f, outer[2], hints);
+
+    if app.show_help {
+        draw_help_overlay(f, size);
+    }
+}
+
+fn draw_footer(f: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
+    let mut spans = Vec::new();
+    for (i, (key, desc)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            *key,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", desc),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn draw_help_overlay(f: &mut Frame, area: Rect) {
+    let text = vec![
+        Line::from(Span::styled(
+            "Keybindings",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Navigation",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  Tab / 1 / 2 / 3    Switch tabs"),
+        Line::from("  j / k / Up / Down   Scroll / select"),
+        Line::from("  g / G               Jump to top / bottom"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Live Activity",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  /                   Search"),
+        Line::from("  f                   Filter (all/allow/deny)"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Policy",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  d                   Delete selected rule"),
+        Line::from("  e                   Edit rules in $EDITOR"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Approvals",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  y                   Approve selected"),
+        Line::from("  n                   Deny selected"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "General",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("  ?                   Toggle this help"),
+        Line::from("  q / Esc             Quit"),
+    ];
+
+    let popup = centered_rect(46, (text.len() + 2) as u16, area);
+    f.render_widget(Clear, popup);
+    f.render_widget(
+        Paragraph::new(text).block(
+            Block::default()
+                .title(" Help ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        popup,
+    );
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
@@ -558,11 +699,25 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
     let visible_height = list_area.height.saturating_sub(2) as usize;
     let entries = &app.activity;
 
-    // Filter by search query if active
+    // Apply activity filter, then search
+    let after_filter: Vec<&ActivityEntry> = entries
+        .iter()
+        .filter(|e| match app.activity_filter {
+            1 => matches!(
+                &e.kind,
+                ActivityKind::Decision { result, .. } if result.starts_with("allow")
+            ),
+            2 => matches!(
+                &e.kind,
+                ActivityKind::Decision { result, .. } if !result.starts_with("allow")
+            ),
+            _ => true,
+        })
+        .collect();
     let filtered: Vec<&ActivityEntry> = if app.search_active && !app.search_query.is_empty() {
         let q = app.search_query.to_lowercase();
-        entries
-            .iter()
+        after_filter
+            .into_iter()
             .filter(|e| match &e.kind {
                 ActivityKind::Decision {
                     action,
@@ -581,7 +736,7 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
             })
             .collect()
     } else {
-        entries.iter().collect()
+        after_filter
     };
 
     let total = filtered.len();
@@ -622,18 +777,29 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
                         "DELETE" => Color::Red,
                         _ => Color::White,
                     };
-                    let decided_color = match decided_by.as_str() {
-                        "tree" | "template" => Color::Cyan,
-                        "human" => Color::Magenta,
-                        "yolo" => Color::Yellow,
-                        _ => Color::DarkGray,
-                    };
                     let latency_str = if *latency_ms > 0 {
                         format!(" {}ms", latency_ms)
                     } else {
                         String::new()
                     };
-                    ListItem::new(Line::from(vec![
+                    // Only show decided_by for non-obvious deciders (human, yolo).
+                    // "tree" is the default assumption for allowed requests.
+                    let trailer = match decided_by.as_str() {
+                        "tree" | "template" => {
+                            if latency_str.is_empty() {
+                                String::new()
+                            } else {
+                                format!("  {}", latency_str.trim())
+                            }
+                        }
+                        _ => format!("  {}{}", decided_by, latency_str),
+                    };
+                    let trailer_color = match decided_by.as_str() {
+                        "human" => Color::Magenta,
+                        "yolo" => Color::Yellow,
+                        _ => Color::DarkGray,
+                    };
+                    let mut spans = vec![
                         ts,
                         Span::styled(
                             format!("{:5}", result_str),
@@ -648,11 +814,11 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
                         ),
                         Span::styled(host, Style::default().fg(Color::White)),
                         Span::styled(path, Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            format!("  {}{}", decided_by, latency_str),
-                            Style::default().fg(decided_color),
-                        ),
-                    ]))
+                    ];
+                    if !trailer.is_empty() {
+                        spans.push(Span::styled(trailer, Style::default().fg(trailer_color)));
+                    }
+                    ListItem::new(Line::from(spans))
                 }
                 ActivityKind::HumanApproval {
                     action,
@@ -709,11 +875,17 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let title_suffix = if app.search_active && !app.search_query.is_empty() {
-        format!(" Activity ({}/{}) ", total, entries.len())
-    } else {
-        format!(" Activity ({}) ", total)
+    let filter_badge = match app.activity_filter {
+        1 => " [ALLOW]",
+        2 => " [DENY]",
+        _ => "",
     };
+    let title_suffix =
+        if (app.search_active && !app.search_query.is_empty()) || app.activity_filter > 0 {
+            format!(" Activity ({}/{}){} ", total, entries.len(), filter_badge)
+        } else {
+            format!(" Activity ({}) ", total)
+        };
     let list = List::new(items).block(
         Block::default()
             .title(title_suffix)
@@ -918,6 +1090,146 @@ fn split_host_path(target: &str) -> (String, String) {
     }
 }
 
+/// Syntax-highlight a single line of CSP source for the template preview.
+fn colorize_csp_line(line: &str) -> Line<'static> {
+    let trimmed = line.trim();
+
+    // Comments
+    if trimmed.starts_with("//") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    // Annotations: @name("...") or @description("...")
+    if trimmed.starts_with('@') {
+        if let Some(paren) = trimmed.find('(') {
+            let indent = line.len() - trimmed.len();
+            let keyword = &trimmed[..paren];
+            let rest = &trimmed[paren..];
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            if indent > 0 {
+                spans.push(Span::raw(" ".repeat(indent)));
+            }
+            spans.push(Span::styled(
+                keyword.to_string(),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                rest.to_string(),
+                Style::default().fg(Color::Yellow),
+            ));
+            return Line::from(spans);
+        }
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+
+    // permit/forbid statements
+    if trimmed.starts_with("permit") || trimmed.starts_with("forbid") {
+        let indent = line.len() - trimmed.len();
+        let is_permit = trimmed.starts_with("permit");
+        let keyword = if is_permit { "permit" } else { "forbid" };
+        let after_keyword = &trimmed[keyword.len()..];
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if indent > 0 {
+            spans.push(Span::raw(" ".repeat(indent)));
+        }
+        spans.push(Span::styled(
+            keyword.to_string(),
+            Style::default()
+                .fg(if is_permit { Color::Green } else { Color::Red })
+                .add_modifier(Modifier::BOLD),
+        ));
+
+        // Try to extract the pattern from (action == "PATTERN")
+        if let Some(q1) = after_keyword.find('"') {
+            let before_quote = &after_keyword[..q1];
+            let after_first_quote = &after_keyword[q1 + 1..];
+            if let Some(q2) = after_first_quote.find('"') {
+                let pattern = &after_first_quote[..q2];
+                let remainder = &after_first_quote[q2 + 1..];
+                spans.push(Span::styled(
+                    before_quote.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(
+                    "\"".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.extend(colorize_pattern(pattern));
+                spans.push(Span::styled(
+                    "\"".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                spans.push(Span::styled(
+                    remainder.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+                return Line::from(spans);
+            }
+        }
+        spans.push(Span::styled(
+            after_keyword.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        return Line::from(spans);
+    }
+
+    // reason("...") lines
+    if trimmed.starts_with("reason") {
+        let indent = line.len() - trimmed.len();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if indent > 0 {
+            spans.push(Span::raw(" ".repeat(indent)));
+        }
+        spans.push(Span::styled(
+            "reason".to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        let after = trimmed.strip_prefix("reason").unwrap_or(trimmed);
+        if let Some(q1) = after.find('"') {
+            spans.push(Span::styled(
+                after[..q1].to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            let in_quotes = &after[q1..];
+            if let Some(q2) = in_quotes[1..].find('"') {
+                let quoted = &in_quotes[..q2 + 2];
+                let rest = &in_quotes[q2 + 2..];
+                spans.push(Span::styled(
+                    quoted.to_string(),
+                    Style::default().fg(Color::Yellow),
+                ));
+                spans.push(Span::styled(
+                    rest.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    in_quotes.to_string(),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+        } else {
+            spans.push(Span::styled(
+                after.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        return Line::from(spans);
+    }
+
+    // Empty or unrecognized lines
+    Line::from(line.to_string())
+}
+
 /// Colorize an action pattern string for the Policy tab.
 /// "net:*:api.example.com/*" → [cyan "net", gray ":", yellow "*", gray ":", white "api.example.com", gray "/*"]
 fn colorize_pattern(pattern: &str) -> Vec<Span<'static>> {
@@ -993,10 +1305,32 @@ fn split_action(action: &str) -> (&str, &str) {
     (action, "")
 }
 
-// ── Session list view ──────────────────────────────────────────────────────
+// ── Hub view (sessions + templates) ────────────────────────────────────────
 
-pub fn run_session_list(db: &closedshell_lib::db::SessionDb) -> Result<()> {
-    let sessions = db.list_sessions()?;
+/// Shorten a workdir path for display: ~/repos/project or /tmp/...
+fn short_workdir(wd: &str, max: usize) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let display = if !home.is_empty() && wd.starts_with(&home) {
+        format!("~{}", &wd[home.len()..])
+    } else {
+        wd.to_string()
+    };
+    if display.len() <= max {
+        display
+    } else {
+        // Show last `max - 3` chars with "..." prefix
+        format!("...{}", &display[display.len() - (max - 3)..])
+    }
+}
+
+pub fn run_hub(db: &closedshell_lib::db::SessionDb, templates_dir: &std::path::Path) -> Result<()> {
+    let all_sessions = db.list_sessions()?;
+    // Filter out noise: hide ended sessions with 0 decisions (test artifacts)
+    let sessions: Vec<_> = all_sessions
+        .into_iter()
+        .filter(|s| s.total_decisions > 0 || s.status == "running")
+        .collect();
+    let templates = closedshell_lib::template::list(templates_dir).unwrap_or_default();
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -1004,103 +1338,296 @@ pub fn run_session_list(db: &closedshell_lib::db::SessionDb) -> Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut selected: usize = 0;
+    let mut active_tab: usize = 0; // 0=Sessions, 1=Templates
+    let mut selected_session: usize = 0;
+    let mut selected_template: usize = 0;
+    let mut template_detail: Option<String> = None;
+    let mut detail_scroll: usize = 0;
 
     loop {
+        let tab = active_tab;
+        let sel_s = selected_session;
+        let sel_t = selected_template;
+        let detail = &template_detail;
+        let d_scroll = detail_scroll;
+
         terminal.draw(|f| {
             let size = f.area();
 
-            let header = Paragraph::new(Line::from(vec![
-                Span::styled("closedshell", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("  sessions  "),
-                Span::styled(
-                    "[enter] open  [d] delete  [q] quit",
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
-            .block(Block::default().borders(Borders::BOTTOM));
-
-            let chunks = Layout::default()
+            let outer = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(2), Constraint::Min(0)])
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                    Constraint::Length(1),
+                ])
                 .split(size);
 
-            f.render_widget(header, chunks[0]);
-
-            let items: Vec<ListItem> = sessions
+            // Header with tabs
+            let tab_titles: Vec<Line> = ["Sessions", "Templates"]
                 .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    let (dot, dot_color) = match s.status.as_str() {
-                        "running" => ("●", Color::Green),
-                        "crashed" => ("●", Color::Red),
-                        _ => ("○", Color::DarkGray),
-                    };
-                    let style = if i == selected {
-                        Style::default().add_modifier(Modifier::REVERSED)
-                    } else {
-                        Style::default()
-                    };
-                    // Truncate workdir to last 30 chars
-                    let wd = if s.workdir.len() > 30 {
-                        format!("...{}", &s.workdir[s.workdir.len() - 27..])
-                    } else {
-                        s.workdir.clone()
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!(" {} ", dot), Style::default().fg(dot_color)),
-                        Span::styled(format!("{:10}", s.id), style.add_modifier(Modifier::BOLD)),
-                        Span::styled(format!("  {:30}", wd), style),
-                        Span::styled(format!("  {:12}", s.command), style),
-                        Span::styled(
-                            format!(
-                                "  {}  decisions={}",
-                                short_ts(&s.last_used),
-                                s.total_decisions
-                            ),
-                            style.fg(Color::DarkGray),
-                        ),
-                    ]))
-                })
+                .map(|t| Line::from(*t))
                 .collect();
+            let header_tabs = Tabs::new(tab_titles)
+                .select(tab)
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .block(
+                    Block::default()
+                        .title(Span::styled(
+                            " closedshell ",
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .borders(Borders::ALL),
+                );
+            f.render_widget(header_tabs, outer[0]);
 
-            let list = List::new(items).block(
-                Block::default()
-                    .title(format!(" Sessions ({}) ", sessions.len()))
-                    .borders(Borders::ALL),
-            );
-            f.render_widget(list, chunks[1]);
+            // Content area
+            match tab {
+                0 => {
+                    // Sessions list
+                    let wd_width = (outer[1].width as usize).saturating_sub(30).min(40);
+                    let items: Vec<ListItem> = sessions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            let (dot, dot_color) = match s.status.as_str() {
+                                "running" => ("●", Color::Green),
+                                "crashed" => ("●", Color::Red),
+                                _ => ("○", Color::DarkGray),
+                            };
+                            let selected = i == sel_s;
+                            let wd = short_workdir(&s.workdir, wd_width);
+                            let mut spans = vec![
+                                Span::styled(format!(" {} ", dot), Style::default().fg(dot_color)),
+                                Span::styled(
+                                    s.id[..8.min(s.id.len())].to_string(),
+                                    if selected {
+                                        Style::default()
+                                            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                                    } else {
+                                        Style::default().add_modifier(Modifier::BOLD)
+                                    },
+                                ),
+                                Span::styled(
+                                    format!("  {:<width$}", wd, width = wd_width),
+                                    if selected {
+                                        Style::default().fg(Color::White)
+                                    } else {
+                                        Style::default().fg(Color::DarkGray)
+                                    },
+                                ),
+                                Span::styled(
+                                    format!("  {}", short_ts(&s.created_at)),
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                            ];
+                            // Show command only if it's not just "claude"
+                            let cmd = s.command.trim();
+                            if cmd != "claude" && !cmd.is_empty() {
+                                spans.push(Span::styled(
+                                    format!("  {}", truncate(cmd, 30)),
+                                    Style::default().fg(Color::DarkGray),
+                                ));
+                            }
+                            if s.total_decisions > 0 {
+                                spans.push(Span::styled(
+                                    format!("  {}", s.total_decisions),
+                                    Style::default().fg(Color::Cyan),
+                                ));
+                            }
+                            ListItem::new(Line::from(spans))
+                        })
+                        .collect();
+
+                    let running = sessions.iter().filter(|s| s.status == "running").count();
+                    let title = if running > 0 {
+                        format!(" Sessions ({}, {} running) ", sessions.len(), running)
+                    } else {
+                        format!(" Sessions ({}) ", sessions.len())
+                    };
+                    let list =
+                        List::new(items).block(Block::default().title(title).borders(Borders::ALL));
+                    f.render_widget(list, outer[1]);
+                }
+                1 => {
+                    if let Some(csp) = detail {
+                        // Template detail view with syntax highlighting
+                        let lines: Vec<Line> = csp.lines().map(colorize_csp_line).collect();
+                        let visible = outer[1].height.saturating_sub(2) as usize;
+                        let skip = d_scroll.min(lines.len().saturating_sub(visible));
+                        let visible_lines: Vec<Line> =
+                            lines.into_iter().skip(skip).take(visible).collect();
+                        let name = templates
+                            .get(sel_t)
+                            .map(|t| t.name.as_str())
+                            .unwrap_or("template");
+                        let p = Paragraph::new(visible_lines).block(
+                            Block::default()
+                                .title(format!(" {} ", name))
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Cyan)),
+                        );
+                        f.render_widget(p, outer[1]);
+                    } else {
+                        // Template list
+                        let items: Vec<ListItem> = templates
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t)| {
+                                let style = if i == sel_t {
+                                    Style::default().add_modifier(Modifier::REVERSED)
+                                } else {
+                                    Style::default()
+                                };
+                                let source_str = match t.source {
+                                    closedshell_lib::template::TemplateSource::BuiltIn => {
+                                        "built-in"
+                                    }
+                                    closedshell_lib::template::TemplateSource::User => "user",
+                                };
+                                let desc = truncate(&t.description, 38);
+                                ListItem::new(Line::from(vec![
+                                    Span::styled(
+                                        format!("  {:22}", t.name),
+                                        style.add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::styled(format!("  {:40}", desc), style),
+                                    Span::styled(
+                                        format!("  {:3} rules", t.rule_count),
+                                        style.fg(Color::Cyan),
+                                    ),
+                                    Span::styled(
+                                        format!("  {}", source_str),
+                                        style.fg(Color::DarkGray),
+                                    ),
+                                ]))
+                            })
+                            .collect();
+
+                        let list = List::new(items).block(
+                            Block::default()
+                                .title(format!(" Templates ({}) ", templates.len()))
+                                .borders(Borders::ALL),
+                        );
+                        f.render_widget(list, outer[1]);
+                    }
+                }
+                _ => {}
+            }
+
+            // Footer
+            let hints: &[(&str, &str)] = if detail.is_some() {
+                &[("Esc", "back"), ("j/k", "scroll"), ("q", "quit")]
+            } else {
+                match tab {
+                    0 => &[
+                        ("Enter", "open"),
+                        ("d", "delete"),
+                        ("j/k", "select"),
+                        ("Tab", "templates"),
+                        ("q", "quit"),
+                    ],
+                    1 => &[
+                        ("Enter", "show"),
+                        ("j/k", "select"),
+                        ("Tab", "sessions"),
+                        ("q", "quit"),
+                    ],
+                    _ => &[("q", "quit")],
+                }
+            };
+            draw_footer(f, outer[2], hints);
         })?;
 
         if event::poll(Duration::from_millis(250))?
             && let Event::Key(key) = event::read()?
         {
+            // Template detail view keys
+            if template_detail.is_some() {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Backspace => {
+                        template_detail = None;
+                        detail_scroll = 0;
+                    }
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        detail_scroll = detail_scroll.saturating_add(1);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        detail_scroll = detail_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => detail_scroll = 0,
+                    KeyCode::End | KeyCode::Char('G') => detail_scroll = usize::MAX / 2,
+                    _ => {}
+                }
+                continue;
+            }
+
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    selected = selected.saturating_sub(1);
+
+                // Tab switching
+                KeyCode::Tab => {
+                    active_tab = (active_tab + 1) % 2;
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if !sessions.is_empty() {
-                        selected = (selected + 1).min(sessions.len() - 1);
+                KeyCode::Char('1') => active_tab = 0,
+                KeyCode::Char('2') => active_tab = 1,
+
+                // Navigation
+                KeyCode::Up | KeyCode::Char('k') => match active_tab {
+                    0 => selected_session = selected_session.saturating_sub(1),
+                    1 => selected_template = selected_template.saturating_sub(1),
+                    _ => {}
+                },
+                KeyCode::Down | KeyCode::Char('j') => match active_tab {
+                    0 => {
+                        if !sessions.is_empty() {
+                            selected_session = (selected_session + 1).min(sessions.len() - 1);
+                        }
                     }
-                }
-                KeyCode::Enter => {
-                    if let Some(s) = sessions.get(selected) {
-                        // Drop the terminal, run session TUI, re-enter our TUI on return
-                        disable_raw_mode()?;
-                        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                        let db_log = PathBuf::from(&s.log_path);
-                        let _ = run(&s.id, Some(&db_log));
-                        enable_raw_mode()?;
-                        crossterm::execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                    1 => {
+                        if !templates.is_empty() {
+                            selected_template = (selected_template + 1).min(templates.len() - 1);
+                        }
                     }
-                }
-                KeyCode::Char('d') => {
-                    if let Some(s) = sessions.get(selected) {
+                    _ => {}
+                },
+
+                // Actions
+                KeyCode::Enter => match active_tab {
+                    0 => {
+                        if let Some(s) = sessions.get(selected_session) {
+                            disable_raw_mode()?;
+                            crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                            let db_log = PathBuf::from(&s.log_path);
+                            let _ = run(&s.id, Some(&db_log));
+                            enable_raw_mode()?;
+                            crossterm::execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                        }
+                    }
+                    1 => {
+                        if let Some(t) = templates.get(selected_template) {
+                            if let Ok((csp, _)) =
+                                closedshell_lib::template::resolve(&t.resolve_key, templates_dir)
+                            {
+                                template_detail = Some(csp);
+                                detail_scroll = 0;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                KeyCode::Char('d') if active_tab == 0 => {
+                    if let Some(s) = sessions.get(selected_session) {
                         let _ = db.delete_session(&s.id);
-                        // Refresh — break out and let caller restart if needed
                         break;
                     }
                 }
@@ -1162,6 +1689,17 @@ pub fn run(session_id: &str, db_log_path: Option<&std::path::Path>) -> Result<()
         if event::poll(tick_rate)?
             && let Event::Key(key) = event::read()?
         {
+            // Help overlay intercepts all keys
+            if app.show_help {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                        app.show_help = false;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             // Search mode intercepts all keys
             if app.search_active {
                 match key.code {
@@ -1307,6 +1845,16 @@ pub fn run(session_id: &str, db_log_path: Option<&std::path::Path>) -> Result<()
                     }
 
                     let _ = std::fs::remove_file(&tmpfile);
+                }
+
+                // Help overlay
+                KeyCode::Char('?') => {
+                    app.show_help = true;
+                }
+
+                // Activity filter (tab 0)
+                KeyCode::Char('f') if app.active_tab == 0 => {
+                    app.activity_filter = (app.activity_filter + 1) % 3;
                 }
 
                 // Live search (tab 0)

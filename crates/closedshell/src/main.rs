@@ -411,7 +411,9 @@ async fn main() -> anyhow::Result<()> {
             cs_dir.join("sessions.db")
         };
         let db = SessionDb::open(&db_path)?;
-        return tui::run_session_list(&db);
+        let config = config::load_config()?;
+        let templates_dir = PathBuf::from(config::resolve_tilde(&config.sandbox.templates_dir));
+        return tui::run_hub(&db, &templates_dir);
     }
 
     tracing_subscriber::fmt()

@@ -13,6 +13,8 @@ pub struct Action {
     pub service: String,
     pub operation: String,
     pub raw: String,
+    /// Always `net:METHOD:host/path`, even when a provider parser matched.
+    pub net_form: String,
 }
 
 impl Action {
@@ -34,23 +36,22 @@ pub struct RequestInfo {
 
 /// Parse an HTTP request into a canonical action.
 pub fn parse_action(req: &RequestInfo) -> Action {
-    if let Some(action) = try_parse_aws(req) {
-        return action;
-    }
-    if let Some(action) = try_parse_gcp(req) {
-        return action;
-    }
-    if let Some(action) = try_parse_github(req) {
-        return action;
-    }
-    if let Some(action) = try_parse_azure(req) {
-        return action;
-    }
-    if let Some(action) = try_parse_k8s(req) {
-        return action;
-    }
-
-    parse_generic(req)
+    let net_form = format!("net:{}:{}{}", req.method, req.host, req.path);
+    let mut action = if let Some(a) = try_parse_aws(req) {
+        a
+    } else if let Some(a) = try_parse_gcp(req) {
+        a
+    } else if let Some(a) = try_parse_github(req) {
+        a
+    } else if let Some(a) = try_parse_azure(req) {
+        a
+    } else if let Some(a) = try_parse_k8s(req) {
+        a
+    } else {
+        parse_generic(req)
+    };
+    action.net_form = net_form;
+    action
 }
 
 fn parse_generic(req: &RequestInfo) -> Action {
@@ -60,7 +61,8 @@ fn parse_generic(req: &RequestInfo) -> Action {
         qualifier: HashMap::new(),
         service: req.host.clone(),
         operation: req.method.clone(),
-        raw,
+        raw: raw.clone(),
+        net_form: raw,
     }
 }
 
@@ -100,6 +102,7 @@ fn try_parse_aws(req: &RequestInfo) -> Option<Action> {
         service: service.into(),
         operation,
         raw,
+        net_form: String::new(),
     })
 }
 
@@ -183,6 +186,7 @@ fn try_parse_gcp(req: &RequestInfo) -> Option<Action> {
         service: service.into(),
         operation,
         raw,
+        net_form: String::new(),
     })
 }
 
@@ -310,6 +314,7 @@ fn try_parse_azure(req: &RequestInfo) -> Option<Action> {
             service,
             operation,
             raw,
+            net_form: String::new(),
         });
     }
 
@@ -365,6 +370,7 @@ fn try_parse_azure(req: &RequestInfo) -> Option<Action> {
         service: service.into(),
         operation,
         raw,
+        net_form: String::new(),
     })
 }
 
@@ -483,6 +489,7 @@ fn try_parse_k8s(req: &RequestInfo) -> Option<Action> {
         service: resource.into(),
         operation: verb.into(),
         raw,
+        net_form: String::new(),
     })
 }
 
@@ -500,6 +507,7 @@ fn try_parse_github(req: &RequestInfo) -> Option<Action> {
         service: path.to_string(),
         operation: req.method.clone(),
         raw,
+        net_form: String::new(),
     })
 }
 
