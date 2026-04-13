@@ -18,17 +18,23 @@ class Closedshell < Formula
     bin.install "closedshell"
     bin.install_symlink "closedshell" => "cs"
 
-    # Install bundled templates
+    # Stage templates to share for post_install to copy to ~/.closedshell/templates
     (share/"closedshell/templates").install Dir["templates/*"] if Dir.exist?("templates")
+  end
+
+  def post_install
+    templates_src = share/"closedshell/templates"
+    return unless templates_src.exist?
+
+    templates_dst = Pathname.new(Dir.home)/".closedshell"/"templates"
+    templates_dst.mkpath
+    FileUtils.cp_r(Dir["#{templates_src}/*"], templates_dst)
   end
 
   def caveats
     <<~EOS
       Bundled templates installed to:
-        #{share}/closedshell/templates
-
-      Copy them to your config directory:
-        cp -r #{share}/closedshell/templates ~/.closedshell/templates
+        ~/.closedshell/templates
     EOS
   end
 
