@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/mascot.png" alt="ClosedShell mascot — a hermit crab" width="200">
+  <img src="docs/mascot.png" alt="ClosedShell mascot — a hermit crab" width="400">
 </p>
 
 # ClosedShell
