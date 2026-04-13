@@ -56,7 +56,7 @@ make install    # builds and installs to ~/.cargo/bin
 3. Proxy terminates TLS, parses API calls into canonical actions (e.g. `aws:s3:ListBuckets`)
 4. Actions are checked against a Cedar-inspired permission tree (forbid overrides permit, default deny)
 5. Unknown actions block for human approval via TUI — the proxy holds the request (no agent retries needed)
-6. Decisions are persisted to SQLite; a TUI shows live session activity and pending approvals
+6. Decisions are persisted to SQLite; the TUI shows live activity, pending approvals, and loaded policy rules
 
 ---
 
@@ -87,11 +87,34 @@ Templates pre-approve infrastructure the agent needs to function. Without a temp
 
 ClosedShell sandboxes any process — it's not tied to a specific AI tool. If the process makes HTTPS requests, ClosedShell can intercept and control them.
 
-### TUI — monitor a live session
+---
+
+## TUI
+
+### Hub — browse sessions and templates
 
 ```bash
-closedshell --tui <session-id>
+cs
 ```
+
+Running `cs` with no arguments opens the hub — a unified view of all sessions and available templates. Switch between tabs with `Tab`.
+
+- **Sessions tab**: browse past and running sessions with status, workdir, templates used, and decision counts. Press `Enter` to open a session's live monitor.
+- **Templates tab**: browse all available templates (built-in and user). Press `Enter` to view the full policy with syntax-highlighted CSP preview.
+
+### Session monitor — watch a live session
+
+```bash
+cs --tui <session-id>
+```
+
+Three tabs for the active session:
+
+- **Live**: real-time activity feed with decisions (allow/deny), filterable with `f` (cycle All/Allow/Deny), searchable with `/`
+- **Policy**: loaded permission rules from templates and human approvals
+- **Approvals**: pending requests waiting for human decision (`y` approve, `n` deny)
+
+Press `?` for a help overlay with all keybindings. Context-sensitive key hints are shown in the footer.
 
 ---
 
@@ -110,10 +133,12 @@ closedshell [OPTIONS] [COMMAND]...
 
 Options:
   --template <TEMPLATE>  Permission template to load (repeatable)
-  --task <TASK>          Session task description (shown in MOTD and audit log)
+  --task <TASK>          Session task (skips interactive prompt, enables instruction injection)
   --yolo                 Log-only mode — no blocking
   --resume               Resume rules from previous session in this directory
-  --allow <ALLOW>        Allow actions matching this glob pattern (repeatable)
+  --allow <ALLOW>        Allow actions matching this glob pattern (repeatable, default deny when set)
+  --pf                   Enable pf (packet filter) as secondary network enforcement layer (requires root)
+  --pf-setup             One-time system setup for pf enforcement (creates sandbox user + pf anchor)
   --tui <SESSION_ID>     Open the TUI monitor for an existing session
   --no-motd              Suppress MOTD on start
 ```
@@ -122,7 +147,24 @@ Options:
 
 ## Templates
 
-Templates are YAML files that pre-approve known-good endpoints. Built-in templates are compiled into the binary — they work immediately after install with no setup.
+Templates use a Cedar-inspired `.csp` (ClosedShell Policy) format to pre-approve known-good endpoints. Built-in templates are compiled into the binary — they work immediately after install with no setup.
+
+```
+@name("anthropic-full")
+@description("Allow all Anthropic API, MCP proxy, and Claude Code infra endpoints")
+
+// Core API
+permit (action == "net:*:api.anthropic.com/*");
+
+// MCP proxy
+permit (action == "net:*:mcp-proxy.anthropic.com/*");
+
+// Block admin endpoints
+forbid (action == "net:*:api.anthropic.com/admin/*")
+  reason("admin access blocked");
+```
+
+### Built-in templates
 
 | Template | What it permits |
 |----------|----------------|
@@ -139,7 +181,7 @@ Templates are YAML files that pre-approve known-good endpoints. Built-in templat
 When you pass `--template myservice/full`, ClosedShell looks in order:
 
 1. Exact file path (absolute or relative)
-2. `~/.closedshell/templates/myservice/full.yaml` (your custom templates)
+2. `~/.closedshell/templates/myservice/full.csp` (your custom templates)
 3. Built-in templates (compiled into the binary)
 
 User templates override built-in ones — drop a file with the same path in `~/.closedshell/templates/` to customize.
@@ -149,7 +191,7 @@ User templates override built-in ones — drop a file with the same path in `~/.
 ```bash
 # Scaffold a new template
 cs template init myservice
-# → creates ~/.closedshell/templates/myservice/full.yaml
+# → creates ~/.closedshell/templates/myservice/full.csp
 
 # Or generate one from observed traffic
 cs --yolo -- <command>
@@ -170,7 +212,7 @@ cs template check myservice/full "net:DELETE:api.myservice.com/admin"
 
 ```
 cs template list                         Show all templates (built-in and user) with source
-cs template show <name>                  Display resolved template YAML
+cs template show <name>                  Display resolved template content
 cs template validate <name>              Validate and show rule summary
 cs template check <name> <action>        Test if an action would be permitted/forbidden
 cs template init <provider>              Scaffold a new template
@@ -203,7 +245,7 @@ sandbox:
 crates/
   closedshell-lib/   # shared library (config, parsers, proxy, audit, tls, sandbox)
   closedshell/       # host binary (CLI + daemon + TUI)
-templates/           # bundled permission templates
+templates/           # bundled permission templates (.csp format)
 docs/                # design docs
 ```
 
