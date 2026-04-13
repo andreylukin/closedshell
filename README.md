@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/mascot.png" alt="ClosedShell mascot — a hermit crab" width="200">
+</p>
+
 # ClosedShell
 
 [![CI](https://github.com/andreylukin/closedshell/actions/workflows/ci.yml/badge.svg)](https://github.com/andreylukin/closedshell/actions/workflows/ci.yml)
