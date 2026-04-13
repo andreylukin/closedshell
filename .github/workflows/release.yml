@@ -20,8 +20,8 @@ jobs:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
-      - name: Test
-        run: cargo test
+      - name: Test (lib only — CLI tests require sandbox entitlements)
+        run: cargo test -p closedshell-lib
 
       - name: Build (aarch64)
         run: cargo build --release --target aarch64-apple-darwin
