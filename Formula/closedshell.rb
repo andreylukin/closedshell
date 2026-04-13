@@ -7,10 +7,10 @@ class Closedshell < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://github.com/andreylukin/closedshell/releases/download/v#{version}/closedshell-v#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "87e016b6cb2e3e298a9a159c72b1ca6dc7af8e92a0aec1379ff3d9349e1bee60"
+      sha256 "42f473cd8cf6dc0e40bf148ed2d8b216b183286f102bb9c61cbca14961cab3c4"
     else
       url "https://github.com/andreylukin/closedshell/releases/download/v#{version}/closedshell-v#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "0eafa2472bb67bb32e2cbc6625e128af0a1a2112e55e8c1147fa942b64886ae9"
+      sha256 "eb2438e21af4a8bb82466c1623fbc667d9202dad6303a0ab3d1c5a42753e5712"
     end
   end
 
