@@ -72,10 +72,10 @@ cs --yolo -- claude
 
 ```bash
 # Claude Code
-cs --template anthropic/full --task "refactor the auth module" -- claude
+cs --template anthropic/full -- claude
 
 # OpenAI Codex CLI
-cs --template openai/full --task "add unit tests" -- codex
+cs --template openai/full -- codex
 
 # Any agent or process
 cs --template github/full -- aider --model gpt-4
@@ -133,14 +133,11 @@ closedshell [OPTIONS] [COMMAND]...
 
 Options:
   --template <TEMPLATE>  Permission template to load (repeatable)
-  --task <TASK>          Session task (skips interactive prompt, enables instruction injection)
   --yolo                 Log-only mode — no blocking
   --resume               Resume rules from previous session in this directory
-  --allow <ALLOW>        Allow actions matching this glob pattern (repeatable, default deny when set)
   --pf                   Enable pf (packet filter) as secondary network enforcement layer (requires root)
   --pf-setup             One-time system setup for pf enforcement (creates sandbox user + pf anchor)
   --tui <SESSION_ID>     Open the TUI monitor for an existing session
-  --no-motd              Suppress MOTD on start
 ```
 
 ---

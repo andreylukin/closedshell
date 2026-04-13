@@ -8,9 +8,7 @@ use closedshell_lib::db::{RuleRow, SessionDb, SessionRow};
 use closedshell_lib::ipc::{EnforcingIpcHandler, IpcHandler, IpcServer, SessionState};
 use closedshell_lib::permission::PermissionTree;
 use closedshell_lib::pf;
-use closedshell_lib::proxy::{
-    DecisionMaker, EnforcingDecider, MitmProxy, PatternDecider, YoloDecider,
-};
+use closedshell_lib::proxy::{DecisionMaker, EnforcingDecider, MitmProxy, YoloDecider};
 use closedshell_lib::sandbox;
 use closedshell_lib::template;
 use closedshell_lib::tls::SessionCA;
@@ -25,25 +23,13 @@ struct Cli {
     #[arg(long)]
     template: Vec<String>,
 
-    /// Session task (skips interactive prompt, enables instruction injection)
-    #[arg(long)]
-    task: Option<String>,
-
     /// Log-only mode — no blocking
     #[arg(long)]
     yolo: bool,
 
-    /// Suppress MOTD on start
-    #[arg(long)]
-    no_motd: bool,
-
     /// Resume rules from previous session in this directory
     #[arg(long)]
     resume: bool,
-
-    /// Allow actions matching this glob pattern (repeatable, default deny when set)
-    #[arg(long)]
-    allow: Vec<String>,
 
     /// Enable pf (packet filter) as secondary network enforcement layer (requires root)
     #[arg(long)]
@@ -427,7 +413,6 @@ async fn main() -> anyhow::Result<()> {
     let mut config = config::load_config()?;
     let flags = CliFlags {
         yolo: cli.yolo,
-        no_motd: cli.no_motd,
         templates: cli.template.clone(),
     };
     config.merge_cli_flags(&flags);
@@ -483,8 +468,6 @@ async fn main() -> anyhow::Result<()> {
         false
     };
 
-    let task = cli.task.clone();
-
     // 3. Create tmpdir
     let tmpdir = PathBuf::from(format!("/private/tmp/closedshell-{}", session_id));
     std::fs::create_dir_all(&tmpdir)?;
@@ -537,9 +520,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Build session state
     let state = Arc::new(SessionState::new());
-    if let Some(ref t) = task {
-        state.set_task(t.clone());
-    }
 
     // Build approval queue (used in enforcing mode)
     let approval_queue = Arc::new(ApprovalQueue::new());
@@ -547,16 +527,7 @@ async fn main() -> anyhow::Result<()> {
     // Build decider + optional IPC handler: yolo vs enforcing
     let (decider, ipc_handler): (Arc<dyn DecisionMaker>, Option<Arc<dyn IpcHandler>>) =
         if config.sandbox.yolo {
-            if !cli.allow.is_empty() {
-                (
-                    Arc::new(PatternDecider {
-                        allow_patterns: cli.allow.clone(),
-                    }) as Arc<dyn DecisionMaker>,
-                    None,
-                )
-            } else {
-                (Arc::new(YoloDecider) as Arc<dyn DecisionMaker>, None)
-            }
+            (Arc::new(YoloDecider) as Arc<dyn DecisionMaker>, None)
         } else {
             (
                 Arc::new(EnforcingDecider {
@@ -661,9 +632,6 @@ async fn main() -> anyhow::Result<()> {
         };
         let session_tag = if is_resumed { "resumed" } else { "new" };
         eprintln!("[closedshell] session {} ({})", session_id, session_tag);
-        if let Some(ref t) = task {
-            eprintln!("[closedshell] task: {}", t);
-        }
         if !cli.template.is_empty() {
             eprintln!("[closedshell] templates: {}", cli.template.join(", "));
         }
@@ -685,7 +653,7 @@ async fn main() -> anyhow::Result<()> {
             id: session_id.clone(),
             workdir: cwd.clone(),
             command: cli.command.join(" "),
-            task: task.clone(),
+            task: None,
             status: "running".into(),
             templates: serde_json::to_string(&cli.template).unwrap_or_default(),
             pid: std::process::id() as i64,

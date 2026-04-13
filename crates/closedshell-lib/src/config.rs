@@ -69,7 +69,6 @@ pub fn resolve_tilde(path: &str) -> String {
 /// CLI flags that can override config values.
 pub struct CliFlags {
     pub yolo: bool,
-    pub no_motd: bool,
     pub templates: Vec<String>,
 }
 
@@ -78,9 +77,6 @@ impl Config {
     pub fn merge_cli_flags(&mut self, flags: &CliFlags) {
         if flags.yolo {
             self.sandbox.yolo = true;
-        }
-        if flags.no_motd {
-            self.sandbox.motd = false;
         }
         if !flags.templates.is_empty() {
             self.sandbox.templates_dir = resolve_tilde(&self.sandbox.templates_dir);
@@ -180,35 +176,29 @@ mod tests {
     fn test_merge_cli_flags_yolo() {
         let mut config = Config::default();
         assert!(!config.sandbox.yolo);
-        assert!(config.sandbox.motd);
 
         let flags = CliFlags {
             yolo: true,
-            no_motd: true,
             templates: vec![],
         };
         config.merge_cli_flags(&flags);
 
         assert!(config.sandbox.yolo);
-        assert!(!config.sandbox.motd);
     }
 
     #[test]
     fn test_merge_cli_flags_no_override_when_false() {
         let mut config = Config::default();
         config.sandbox.yolo = true;
-        config.sandbox.motd = false;
 
         let flags = CliFlags {
             yolo: false,
-            no_motd: false,
             templates: vec![],
         };
         config.merge_cli_flags(&flags);
 
         // Flags are false, so config values should remain unchanged
         assert!(config.sandbox.yolo);
-        assert!(!config.sandbox.motd);
     }
 
     #[test]

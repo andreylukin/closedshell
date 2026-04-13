@@ -82,17 +82,6 @@ fn motd_shows_session_and_mode() {
 }
 
 #[test]
-fn no_motd_flag_suppresses_banner() {
-    let (code, _, stderr) = run_closedshell(&["--yolo", "--no-motd", "echo", "hi"]);
-    assert_eq!(code, 0);
-    assert!(
-        !stderr.contains("[closedshell] session"),
-        "MOTD should be suppressed, got: {}",
-        stderr
-    );
-}
-
-#[test]
 fn audit_log_is_created() {
     let tmpdir = tempfile::tempdir().unwrap();
     let log_dir = tmpdir.path().join("logs");
