@@ -479,7 +479,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 6. Generate seatbelt profile, write to tmpdir
-    let ipc_socket_path = format!("{}/ask.sock", tmpdir.display());
+    let ipc_socket_path = format!("{}/cs.sock", tmpdir.display());
     let profile = sandbox::generate_seatbelt_profile(
         actual_port,
         &home.to_string_lossy(),
@@ -593,7 +593,7 @@ async fn main() -> anyhow::Result<()> {
         format!("SSL_CERT_FILE={}", ca_pem_path.display()),
         format!("SSL_CERT_DIR={}", tmpdir.display()),
         "GODEBUG=x509usefallbackroots=1".to_string(),
-        format!("CLOSEDSHELL_SOCKET={}/ask.sock", tmpdir.display()),
+        format!("CLOSEDSHELL_SOCKET={}/cs.sock", tmpdir.display()),
         format!("CLOSEDSHELL_SESSION={}", session_id),
     ];
     for var in &config.sandbox.passthrough_env {

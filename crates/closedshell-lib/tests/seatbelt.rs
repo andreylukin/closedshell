@@ -38,7 +38,7 @@ fn seatbelt_allows_local_commands() {
     let profile = generate_seatbelt_profile(
         8443,
         "/Users/test",
-        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/cs.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
     let (code, stdout, _) = sandbox_run(&profile, &["echo", "hello from sandbox"]);
@@ -51,7 +51,7 @@ fn seatbelt_blocks_outbound_network() {
     let profile = generate_seatbelt_profile(
         8443,
         "/Users/test",
-        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/cs.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
     // curl to an external host should fail — seatbelt denies network-outbound
@@ -86,7 +86,7 @@ fn seatbelt_allows_localhost_proxy_port() {
     let profile = generate_seatbelt_profile(
         port,
         "/Users/test",
-        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/cs.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
     let (code, stdout, _) = sandbox_run(
@@ -115,7 +115,7 @@ fn seatbelt_blocks_non_proxy_localhost_port() {
     let profile = generate_seatbelt_profile(
         wrong_port,
         "/Users/test",
-        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/cs.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
     let (code, _, _) = sandbox_run(
@@ -137,7 +137,7 @@ fn seatbelt_allows_file_operations() {
     let profile = generate_seatbelt_profile(
         8443,
         "/Users/test",
-        "/tmp/closedshell-test/ask.sock",
+        "/tmp/closedshell-test/cs.sock",
         "/tmp/closedshell-test/ca-key.pem",
     );
     let (code, stdout, _) = sandbox_run(&profile, &["ls", "/"]);

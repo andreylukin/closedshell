@@ -121,7 +121,7 @@ closedshell <agent-command>
      env HTTPS_PROXY=http://localhost:8443 \
          HTTP_PROXY=http://localhost:8443 \
          SSL_CERT_FILE=/tmp/closedshell-XXXX/ca.pem \
-         CLOSEDSHELL_SOCKET=/tmp/closedshell-XXXX/ask.sock \
+         CLOSEDSHELL_SOCKET=/tmp/closedshell-XXXX/cs.sock \
      -- <agent-command>
 8. Print MOTD (if enabled)
 9. Open audit log: $PWD/closedshell-$SESSION_ID.log

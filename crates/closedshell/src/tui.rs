@@ -157,8 +157,7 @@ struct SessionInfo {
 
 impl App {
     fn new(session_id: String) -> Self {
-        let socket_path =
-            PathBuf::from(format!("/private/tmp/closedshell-{}/ask.sock", session_id));
+        let socket_path = PathBuf::from(format!("/private/tmp/closedshell-{}/cs.sock", session_id));
 
         let log_name = format!("closedshell-{}.log", session_id);
         let log_path = PathBuf::from(&log_name);
@@ -1351,7 +1350,7 @@ mod tests {
         // We can't easily mock the unix socket, but we can test that
         // poll_rules handles a missing socket gracefully
         let mut app = App::new("nosocket".into());
-        app.socket_path = PathBuf::from("/tmp/closedshell-nosocket/ask.sock");
+        app.socket_path = PathBuf::from("/tmp/closedshell-nosocket/cs.sock");
         app.poll_rules(); // should not panic
         assert!(app.rules.is_empty());
     }
@@ -1535,7 +1534,7 @@ mod tests {
             let tree = Arc::new(PermissionTree::new());
             let audit = Arc::new(AuditLog::open(dir, session_id).unwrap());
 
-            let socket_path = dir.join("ask.sock");
+            let socket_path = dir.join("cs.sock");
             let handler = Arc::new(TestIpcHandler { tree: tree.clone() }) as Arc<dyn IpcHandler>;
             let server = IpcServer::new(socket_path.to_str().unwrap(), handler);
             let ipc_handle = server.start().unwrap();

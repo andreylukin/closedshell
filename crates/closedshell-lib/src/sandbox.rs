@@ -22,7 +22,7 @@ fn regex_escape(path: &str) -> String {
 /// File denies prevent persistence attacks (shell rc injection) and credential theft.
 ///
 /// `home`: user's home directory (e.g. /Users/alice).
-/// `ipc_socket_path`: absolute path to the IPC socket (e.g. /tmp/closedshell-XXXX/ask.sock).
+/// `ipc_socket_path`: absolute path to the IPC socket (e.g. /tmp/closedshell-XXXX/cs.sock).
 /// `ca_key_path`: absolute path to the CA private key to deny agent access.
 pub fn generate_seatbelt_profile(
     proxy_port: u16,
@@ -106,7 +106,7 @@ mod tests {
     use super::*;
 
     const HOME: &str = "/Users/test";
-    const SOCKET: &str = "/tmp/closedshell-test/ask.sock";
+    const SOCKET: &str = "/tmp/closedshell-test/cs.sock";
     const CA_KEY: &str = "/Users/test/.closedshell/ca-key.pem";
 
     fn profile(port: u16) -> String {
