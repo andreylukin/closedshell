@@ -418,10 +418,14 @@ fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
-    let mode = if let Some(ref info) = app.session_info {
-        if info.yolo { "YOLO" } else { "ENFORCING" }
+    let (mode_str, mode_color) = if let Some(ref info) = app.session_info {
+        if info.yolo {
+            ("YOLO", Color::Yellow)
+        } else {
+            ("ENFORCING", Color::Cyan)
+        }
     } else {
-        "..."
+        ("...", Color::DarkGray)
     };
 
     let status = if app.session_ended {
@@ -440,33 +444,76 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|a| matches!(a.kind, ActivityKind::Decision { .. }))
         .count();
+    let denied = app
+        .activity
+        .iter()
+        .filter(|a| {
+            matches!(
+                &a.kind,
+                ActivityKind::Decision { result, .. } if !result.starts_with("allow")
+            )
+        })
+        .count();
     let short_id = if app.session_id.len() > 8 {
         &app.session_id[..8]
     } else {
         &app.session_id
     };
 
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled("closedshell", Style::default().add_modifier(Modifier::BOLD)),
+    let mut spans = vec![
+        Span::styled(
+            "closedshell",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(
             format!(" {} ", short_id),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::raw(format!(" {}  ", mode)),
+        Span::styled(
+            format!(" {} ", mode_str),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
         status,
-        Span::raw(format!("  decisions={}", decisions)),
-        if !app.pending_approvals.is_empty() {
-            Span::styled(
-                format!("  pending={}", app.pending_approvals.len()),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::raw("")
-        },
-    ]))
-    .block(Block::default().borders(Borders::BOTTOM));
+        Span::styled("  decisions=", Style::default().fg(Color::DarkGray)),
+        Span::styled(decisions.to_string(), Style::default().fg(Color::White)),
+    ];
+    if denied > 0 {
+        spans.push(Span::styled(
+            "  denied=",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(
+            denied.to_string(),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !app.pending_approvals.is_empty() {
+        spans.push(Span::styled(
+            "  pending=",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(
+            app.pending_approvals.len().to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if !app.rules.is_empty() {
+        spans.push(Span::styled(
+            "  rules=",
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::styled(
+            app.rules.len().to_string(),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+
+    let header = Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::BOTTOM));
 
     f.render_widget(header, area);
 }
@@ -567,6 +614,20 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
                         ("DENY", Color::Red)
                     };
                     let (method, target) = split_action(action);
+                    let (host, path) = split_host_path(target);
+                    let method_color = match method {
+                        "GET" => Color::Cyan,
+                        "POST" => Color::Yellow,
+                        "PUT" | "PATCH" => Color::Magenta,
+                        "DELETE" => Color::Red,
+                        _ => Color::White,
+                    };
+                    let decided_color = match decided_by.as_str() {
+                        "tree" | "template" => Color::Cyan,
+                        "human" => Color::Magenta,
+                        "yolo" => Color::Yellow,
+                        _ => Color::DarkGray,
+                    };
                     let latency_str = if *latency_ms > 0 {
                         format!(" {}ms", latency_ms)
                     } else {
@@ -579,11 +640,17 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
                             Style::default().fg(color).add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(" "),
-                        Span::styled(format!("{:6} ", method), Style::default().fg(Color::White)),
-                        Span::raw(target),
+                        Span::styled(
+                            format!("{:6} ", method),
+                            Style::default()
+                                .fg(method_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(host, Style::default().fg(Color::White)),
+                        Span::styled(path, Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             format!("  {}{}", decided_by, latency_str),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(decided_color),
                         ),
                     ]))
                 }
@@ -703,7 +770,7 @@ fn draw_rules_tab(f: &mut Frame, app: &App, area: Rect) {
         let semi = if has_reason { "" } else { ";" };
 
         // Main line: effect (action == "pattern");
-        lines.push(Line::from(vec![
+        let mut stmt_spans = vec![
             Span::styled(marker, Style::default().fg(Color::Yellow)),
             Span::styled(
                 effect_str.to_string(),
@@ -712,14 +779,18 @@ fn draw_rules_tab(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" (", Style::default().fg(Color::DarkGray)),
-            Span::raw("action"),
+            Span::styled("action", Style::default().fg(Color::Cyan)),
             Span::styled(" == ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("\"{}\"", r.pattern),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled(format!("){}", semi), Style::default().fg(Color::DarkGray)),
-        ]));
+            Span::styled("\"", Style::default().fg(Color::DarkGray)),
+        ];
+        // Syntax-highlight the pattern: method:host/path or provider:service:op
+        stmt_spans.extend(colorize_pattern(&r.pattern));
+        stmt_spans.push(Span::styled("\"", Style::default().fg(Color::DarkGray)));
+        stmt_spans.push(Span::styled(
+            format!("){}", semi),
+            Style::default().fg(Color::DarkGray),
+        ));
+        lines.push(Line::from(stmt_spans));
 
         // Reason line for forbid rules
         if let Some(ref reason) = r.reason {
@@ -793,9 +864,16 @@ fn draw_approvals(f: &mut Frame, app: &App, area: Rect) {
                 .map(|pid| format!("  plan:{}", pid))
                 .unwrap_or_default();
 
+            let (method, target) = split_action(&p.action);
+            let (host, path) = split_host_path(target);
             ListItem::new(Line::from(vec![
                 Span::styled("→ ", Style::default().fg(Color::Yellow)),
-                Span::styled(truncate(&p.action, 40), style.add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("{} ", method),
+                    style.fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(host, style.fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(truncate(&path, 30), style.fg(Color::DarkGray)),
                 Span::raw("  "),
                 Span::styled(
                     format!("risk={}", p.risk_tier),
@@ -828,6 +906,89 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}...", &s[..max.saturating_sub(3)])
     }
+}
+
+/// Split a target string into (host, path) at the first '/'.
+/// "api.example.com/v1/users" → ("api.example.com", "/v1/users")
+fn split_host_path(target: &str) -> (String, String) {
+    if let Some(slash) = target.find('/') {
+        (target[..slash].to_string(), target[slash..].to_string())
+    } else {
+        (target.to_string(), String::new())
+    }
+}
+
+/// Colorize an action pattern string for the Policy tab.
+/// "net:*:api.example.com/*" → [cyan "net", gray ":", yellow "*", gray ":", white "api.example.com", gray "/*"]
+fn colorize_pattern(pattern: &str) -> Vec<Span<'static>> {
+    // net:METHOD:host/path
+    if let Some(rest) = pattern.strip_prefix("net:") {
+        if let Some(colon) = rest.find(':') {
+            let method = &rest[..colon];
+            let host_path = &rest[colon + 1..];
+            let (host, path) = if let Some(slash) = host_path.find('/') {
+                (&host_path[..slash], &host_path[slash..])
+            } else {
+                (host_path, "")
+            };
+            let method_color = match method {
+                "GET" => Color::Cyan,
+                "POST" => Color::Yellow,
+                "PUT" | "PATCH" => Color::Magenta,
+                "DELETE" => Color::Red,
+                "*" => Color::Yellow,
+                _ => Color::White,
+            };
+            return vec![
+                Span::styled("net", Style::default().fg(Color::Blue)),
+                Span::styled(":", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    method.to_string(),
+                    Style::default()
+                        .fg(method_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(":", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    host.to_string(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(path.to_string(), Style::default().fg(Color::DarkGray)),
+            ];
+        }
+    }
+    // provider[qualifier]:service:op (aws, gcp, azure, k8s)
+    for prefix in &["aws", "gcp", "azure", "k8s"] {
+        if let Some(after) = pattern.strip_prefix(prefix) {
+            if after.starts_with(':') || after.starts_with('[') {
+                // Find service:op split
+                let qualifier_end = if after.starts_with('[') {
+                    after.find(']').map(|i| i + 1).unwrap_or(0)
+                } else {
+                    0
+                };
+                let service_part = &after[qualifier_end..];
+                let qualifier = &after[..qualifier_end];
+                return vec![
+                    Span::styled(
+                        prefix.to_string(),
+                        Style::default()
+                            .fg(Color::Blue)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(qualifier.to_string(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(service_part.to_string(), Style::default().fg(Color::White)),
+                ];
+            }
+        }
+    }
+    // Fallback: plain white
+    vec![Span::styled(
+        pattern.to_string(),
+        Style::default().fg(Color::White),
+    )]
 }
 
 /// Parse a canonical action string into (method, target) for compact display.
