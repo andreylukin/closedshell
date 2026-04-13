@@ -14,13 +14,13 @@
 
 AI coding agents already ask before reading and writing your files. That part's handled.
 
-But they also run `kubectl`, `terraform`, `aws`, `curl` — and call MCP tools that hit arbitrary APIs. **Nobody's checking those.**
+But they also run `kubectl`, `terraform`, `aws`, `curl`, and skills with shell scripts that hit arbitrary APIs. **Nobody's checking those.**
 
 Your agent inherits every credential on your machine. One bad tool call and you're looking at:
 
 - `kubectl delete deployment production`
 - `aws s3 rm s3://prod-backups --recursive`
-- An MCP skill calling an API you've never heard of, using your credentials
+- A skill running `curl` against an API you've never heard of, using your credentials
 - A retry loop burning hundreds of dollars in API costs overnight
 
 This isn't hypothetical. A [Replit agent deleted a production database](https://www.reddit.com/r/replit/comments/1l3nnez/replit_agent_deleted_my_entire_database/) after ignoring explicit instructions 11 times. [Amazon Q was compromised](https://www.theregister.com/2025/06/16/amazon_q_developer_attack/) via a poisoned PR that instructed it to terminate EC2 instances and empty S3 buckets.
@@ -39,7 +39,7 @@ net:GET:api.anthropic.com/*  → ALLOW (template)
 net:POST:api.unknown.com/v1  → BLOCK (asks you in the TUI)
 ```
 
-You define what's allowed using simple [templates](templates/CONTRIBUTING.md). Everything else blocks and asks you in a live terminal UI. The agent keeps full local access — files, shell, tools. The network is the leash.
+You define what's allowed using simple [templates](templates/CONTRIBUTING.md). Everything else blocks and asks you in a live terminal UI. The agent keeps full local access: files, shell, tools. The network is the leash.
 
 One binary. No root. No kernel extensions.
 
@@ -57,9 +57,9 @@ cs --template anthropic/full --template github/readonly -- claude
 cs
 ```
 
-Known endpoints flow through. Unknown ones pause and ask you — the proxy holds the connection until you decide.
+Known endpoints flow through. Unknown ones pause and ask you. The proxy holds the connection until you decide.
 
-### YOLO mode — just watch
+### YOLO mode: just watch
 
 ```bash
 cs --yolo -- claude
@@ -82,7 +82,7 @@ cs --template anthropic/full -- python my_agent.py
 ```
 ┌──────────────────────────────────┐
 │  Sandboxed Shell (Seatbelt)      │
-│  Agent runs here — full local    │
+│  Agent runs here, full local     │
 │  access, no network except proxy │
 └──────────────┬───────────────────┘
                │ localhost:8443
@@ -94,7 +94,7 @@ cs --template anthropic/full -- python my_agent.py
 
 1. **Sandbox.** Seatbelt blocks all outbound network except `localhost:8443`. Files and local tools work normally.
 2. **Proxy.** MITM proxy terminates TLS, reads the request, figures out what the agent is doing.
-3. **Parse.** Requests become semantic actions — `POST s3.amazonaws.com/?delete` → `aws:s3:DeleteBucket`. Built-in parsers for AWS, GCP, Azure, K8s, GitHub. Unknown hosts → `net:METHOD:host/path`.
+3. **Parse.** Requests become semantic actions: `POST s3.amazonaws.com/?delete` becomes `aws:s3:DeleteBucket`. Built-in parsers for AWS, GCP, Azure, K8s, GitHub. Unknown hosts become `net:METHOD:host/path`.
 4. **Decide.** Cedar-inspired policy: **forbid > permit > ask human.** The proxy holds unknown requests while the TUI asks you.
 5. **Persist.** Decisions logged, permissions saved to SQLite, rules carry over between sessions.
 
@@ -128,7 +128,7 @@ cs template generate <session-id> --name myservice-full --save
 cs template show myservice/full
 ```
 
-Templates use a Cedar-inspired `.csp` format — `forbid` always overrides `permit`:
+Templates use a Cedar-inspired `.csp` format. `forbid` always overrides `permit`:
 
 ```
 @name("myservice-full")
