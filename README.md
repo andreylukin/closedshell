@@ -122,7 +122,7 @@ Options:
 
 ## Templates
 
-Templates are YAML files that pre-approve known-good endpoints. Bundled templates:
+Templates are YAML files that pre-approve known-good endpoints. Built-in templates are compiled into the binary — they work immediately after install with no setup.
 
 | Template | What it permits |
 |----------|----------------|
@@ -134,9 +134,50 @@ Templates are YAML files that pre-approve known-good endpoints. Bundled template
 | `exa/readonly` | `api.exa.ai` (read-only) |
 | `exa/search-only` | `api.exa.ai` (search only) |
 
-Install bundled templates: `cp -r templates/ ~/.closedshell/templates/`
+### Resolution order
 
-Or reference by absolute path: `--template /path/to/template.yaml`
+When you pass `--template myservice/full`, ClosedShell looks in order:
+
+1. Exact file path (absolute or relative)
+2. `~/.closedshell/templates/myservice/full.yaml` (your custom templates)
+3. Built-in templates (compiled into the binary)
+
+User templates override built-in ones — drop a file with the same path in `~/.closedshell/templates/` to customize.
+
+### Creating your own templates
+
+```bash
+# Scaffold a new template
+cs template init myservice
+# → creates ~/.closedshell/templates/myservice/full.yaml
+
+# Or generate one from observed traffic
+cs --yolo -- <command>
+cs template generate <session-id> --name myservice-full --save
+
+# Validate your template
+cs template validate myservice/full
+
+# Test specific actions against it
+cs template check myservice/full "net:GET:api.myservice.com/v1/data"
+# → PERMIT — matched: net:*:api.myservice.com/*
+
+cs template check myservice/full "net:DELETE:api.myservice.com/admin"
+# → NO MATCH — would block for human approval
+```
+
+### Template management
+
+```
+cs template list                         Show all templates (built-in and user) with source
+cs template show <name>                  Display resolved template YAML
+cs template validate <name>              Validate and show rule summary
+cs template check <name> <action>        Test if an action would be permitted/forbidden
+cs template init <provider>              Scaffold a new template
+cs template generate <session-id>        Generate from a YOLO session's audit log
+```
+
+See [templates/CONTRIBUTING.md](templates/CONTRIBUTING.md) for the full format reference.
 
 ---
 

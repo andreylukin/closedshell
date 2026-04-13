@@ -1,10 +1,32 @@
-//! Template management: init, list, and generate operations.
+//! Template management: init, list, generate, validate, and check operations.
 
 use anyhow::{Context, Result, bail};
+use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+
+use crate::permission::action_glob_match;
+
+/// Bundled templates embedded at compile time from the repo's templates/ directory.
+static BUNDLED_TEMPLATES: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../templates");
+
+/// Where a template came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateSource {
+    BuiltIn,
+    User,
+}
+
+impl std::fmt::Display for TemplateSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemplateSource::BuiltIn => write!(f, "built-in"),
+            TemplateSource::User => write!(f, "user"),
+        }
+    }
+}
 
 /// Info about a discovered template (returned by `list`).
 #[derive(Debug)]
@@ -13,6 +35,7 @@ pub struct TemplateInfo {
     pub description: String,
     pub path: PathBuf,
     pub rule_count: usize,
+    pub source: TemplateSource,
 }
 
 /// Scaffold a new template for the given provider.
@@ -38,29 +61,208 @@ pub fn init(templates_dir: &Path, provider: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// List all templates in the templates directory.
+/// List all templates from both user directory and bundled sources.
 ///
-/// Walks recursively for `*.yaml` files, parses each to extract metadata.
+/// User templates override bundled ones with the same name.
 /// Returns results sorted by name.
 pub fn list(templates_dir: &Path) -> Result<Vec<TemplateInfo>> {
-    let mut results = Vec::new();
+    let mut by_name: BTreeMap<String, TemplateInfo> = BTreeMap::new();
 
-    if !templates_dir.exists() {
-        return Ok(results);
+    // 1. Load bundled templates first (will be overridden by user templates)
+    collect_bundled_dir(&BUNDLED_TEMPLATES, &mut by_name);
+
+    // 2. Load user templates (override bundled by name)
+    if templates_dir.exists() {
+        walk_yaml_files(templates_dir, &mut |path| {
+            match parse_template_info(&path) {
+                Ok(mut info) => {
+                    info.source = if by_name.contains_key(&info.name) {
+                        // User is overriding a built-in
+                        TemplateSource::User
+                    } else {
+                        TemplateSource::User
+                    };
+                    by_name.insert(info.name.clone(), info);
+                }
+                Err(e) => {
+                    eprintln!("[closedshell] warning: skipping {}: {}", path.display(), e);
+                }
+            }
+        })?;
     }
 
-    walk_yaml_files(templates_dir, &mut |path| {
-        match parse_template_info(&path) {
-            Ok(info) => results.push(info),
-            Err(e) => {
-                // Skip unparseable files with a warning to stderr
-                eprintln!("[closedshell] warning: skipping {}: {}", path.display(), e);
-            }
-        }
-    })?;
-
+    let mut results: Vec<TemplateInfo> = by_name.into_values().collect();
     results.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(results)
+}
+
+/// Resolve a template name to its YAML contents.
+///
+/// Resolution order:
+/// 1. Absolute/relative path on disk
+/// 2. User templates dir (`~/.closedshell/templates/<name>.yaml`)
+/// 3. Bundled (compiled-in) templates
+///
+/// Returns the YAML string and the source description for logging.
+pub fn resolve(name: &str, templates_dir: &Path) -> Result<(String, String)> {
+    let raw = Path::new(name);
+
+    // 1. Direct path
+    if raw.exists() {
+        let yaml = std::fs::read_to_string(raw)
+            .with_context(|| format!("failed to read template {}", raw.display()))?;
+        return Ok((yaml, raw.display().to_string()));
+    }
+    if raw.with_extension("yaml").exists() {
+        let p = raw.with_extension("yaml");
+        let yaml = std::fs::read_to_string(&p)
+            .with_context(|| format!("failed to read template {}", p.display()))?;
+        return Ok((yaml, p.display().to_string()));
+    }
+
+    // 2. User templates dir
+    let user_path = templates_dir.join(format!("{}.yaml", name));
+    if user_path.exists() {
+        let yaml = std::fs::read_to_string(&user_path)
+            .with_context(|| format!("failed to read template {}", user_path.display()))?;
+        return Ok((yaml, user_path.display().to_string()));
+    }
+
+    // 3. Bundled templates
+    let bundled_path = format!("{}.yaml", name);
+    if let Some(file) = BUNDLED_TEMPLATES.get_file(&bundled_path) {
+        if let Some(contents) = file.contents_utf8() {
+            return Ok((contents.to_string(), format!("built-in:{}", name)));
+        }
+    }
+
+    // Not found — build a helpful error
+    bail!(
+        "template '{}' not found\n\nsearched:\n  {}  (not found)\n  built-in templates  (not found)\n\navailable templates: cs template list\ncreate a new one:   cs template init <provider>",
+        name,
+        user_path.display()
+    );
+}
+
+/// Result of validating a template.
+#[derive(Debug)]
+pub struct ValidateResult {
+    pub name: String,
+    pub description: String,
+    pub permits: Vec<String>,
+    pub forbids: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Validate a template's YAML and return a structured summary.
+///
+/// Checks: valid YAML, required fields, valid effect/type values, non-empty action patterns.
+pub fn validate(yaml: &str) -> Result<ValidateResult> {
+    let tpl: FullTemplate =
+        serde_yaml::from_str(yaml).context("invalid YAML: failed to parse template")?;
+
+    let mut permits = Vec::new();
+    let mut forbids = Vec::new();
+    let mut warnings = Vec::new();
+
+    if tpl.name.is_empty() {
+        warnings.push("template name is empty".to_string());
+    }
+    if tpl.rules.is_empty() {
+        warnings.push("template has no rules".to_string());
+    }
+
+    for (i, rule) in tpl.rules.iter().enumerate() {
+        let idx = i + 1;
+        match rule.effect.as_str() {
+            "permit" => {
+                if let Some(ref rt) = rule.rule_type {
+                    if rt != "idempotent" && rt != "one-shot" && rt != "oneshot" {
+                        warnings.push(format!(
+                            "rule {}: unknown type '{}' (expected 'idempotent' or 'one-shot')",
+                            idx, rt
+                        ));
+                    }
+                }
+                permits.push(rule.action.clone());
+            }
+            "forbid" => {
+                if rule.reason.is_none() {
+                    warnings.push(format!("rule {}: forbid rule has no reason", idx));
+                }
+                forbids.push(rule.action.clone());
+            }
+            other => {
+                warnings.push(format!(
+                    "rule {}: unknown effect '{}' (expected 'permit' or 'forbid')",
+                    idx, other
+                ));
+            }
+        }
+        if rule.action.is_empty() {
+            warnings.push(format!("rule {}: action pattern is empty", idx));
+        }
+    }
+
+    Ok(ValidateResult {
+        name: tpl.name,
+        description: tpl.description.unwrap_or_default(),
+        permits,
+        forbids,
+        warnings,
+    })
+}
+
+/// The verdict for a single action checked against a template.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CheckVerdict {
+    Permit(String), // the matching pattern
+    Forbid(String), // the matching pattern
+    NoMatch,
+}
+
+/// Check whether an action would be permitted, forbidden, or unmatched by a template.
+///
+/// Uses the same Cedar-inspired semantics as the runtime: forbid overrides permit.
+pub fn check(yaml: &str, action: &str) -> Result<CheckVerdict> {
+    let tpl: FullTemplate =
+        serde_yaml::from_str(yaml).context("invalid YAML: failed to parse template")?;
+
+    // Phase 1: any forbid match → deny
+    for rule in &tpl.rules {
+        if rule.effect == "forbid" && action_glob_match(&rule.action, action) {
+            return Ok(CheckVerdict::Forbid(rule.action.clone()));
+        }
+    }
+
+    // Phase 2: any permit match → allow
+    for rule in &tpl.rules {
+        if rule.effect == "permit" && action_glob_match(&rule.action, action) {
+            return Ok(CheckVerdict::Permit(rule.action.clone()));
+        }
+    }
+
+    // Phase 3: no match
+    Ok(CheckVerdict::NoMatch)
+}
+
+/// Full template struct for validate/check (includes all fields).
+#[derive(Deserialize)]
+struct FullTemplate {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    rules: Vec<FullTemplateRule>,
+}
+
+#[derive(Deserialize)]
+struct FullTemplateRule {
+    effect: String,
+    action: String,
+    #[serde(rename = "type")]
+    rule_type: Option<String>,
+    reason: Option<String>,
 }
 
 /// Generate a template from a YOLO session's audit log.
@@ -127,6 +329,34 @@ struct LogEvent {
     result: Option<String>,
 }
 
+/// Recursively collect bundled `.yaml` templates from an embedded directory.
+fn collect_bundled_dir(dir: &Dir, out: &mut BTreeMap<String, TemplateInfo>) {
+    for file in dir.files() {
+        if file.path().extension().and_then(|e| e.to_str()) != Some("yaml") {
+            continue;
+        }
+        let Some(contents) = file.contents_utf8() else {
+            continue;
+        };
+        let Ok(meta) = serde_yaml::from_str::<TemplateMeta>(contents) else {
+            continue;
+        };
+        out.insert(
+            meta.name.clone(),
+            TemplateInfo {
+                name: meta.name,
+                description: meta.description.unwrap_or_default(),
+                path: PathBuf::from("(built-in)"),
+                rule_count: meta.rules.len(),
+                source: TemplateSource::BuiltIn,
+            },
+        );
+    }
+    for subdir in dir.dirs() {
+        collect_bundled_dir(subdir, out);
+    }
+}
+
 /// Walk a directory recursively, calling `f` for each `.yaml` file.
 fn walk_yaml_files(dir: &Path, f: &mut dyn FnMut(PathBuf)) -> Result<()> {
     let entries = std::fs::read_dir(dir)
@@ -164,6 +394,7 @@ fn parse_template_info(path: &Path) -> Result<TemplateInfo> {
         description: meta.description.unwrap_or_default(),
         path: path.to_path_buf(),
         rule_count: meta.rules.len(),
+        source: TemplateSource::User,
     })
 }
 
@@ -387,25 +618,93 @@ mod tests {
     fn test_list_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
         let results = list(dir.path()).unwrap();
-        assert!(results.is_empty());
+        // Should still contain bundled templates
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|t| t.source == TemplateSource::BuiltIn));
     }
 
     #[test]
-    fn test_list_finds_templates() {
+    fn test_list_finds_user_templates() {
         let dir = tempfile::tempdir().unwrap();
         init(dir.path(), "svc1").unwrap();
-        init(dir.path(), "svc2").unwrap();
 
         let results = list(dir.path()).unwrap();
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].name, "svc1-full");
-        assert_eq!(results[1].name, "svc2-full");
+        let user_templates: Vec<_> = results
+            .iter()
+            .filter(|t| t.source == TemplateSource::User)
+            .collect();
+        assert_eq!(user_templates.len(), 1);
+        assert_eq!(user_templates[0].name, "svc1-full");
+    }
+
+    #[test]
+    fn test_list_user_overrides_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a user template with same name as a bundled one
+        let anthropic_dir = dir.path().join("anthropic");
+        std::fs::create_dir_all(&anthropic_dir).unwrap();
+        std::fs::write(
+            anthropic_dir.join("full.yaml"),
+            "name: anthropic-full\ndescription: \"Custom override\"\nrules: []\n",
+        )
+        .unwrap();
+
+        let results = list(dir.path()).unwrap();
+        let anthropic = results.iter().find(|t| t.name == "anthropic-full").unwrap();
+        assert_eq!(anthropic.source, TemplateSource::User);
+        assert_eq!(anthropic.description, "Custom override");
     }
 
     #[test]
     fn test_list_nonexistent_dir() {
         let results = list(Path::new("/nonexistent/path")).unwrap();
-        assert!(results.is_empty());
+        // Should still return bundled templates
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_list_includes_bundled() {
+        let dir = tempfile::tempdir().unwrap();
+        let results = list(dir.path()).unwrap();
+        let names: Vec<_> = results.iter().map(|t| t.name.as_str()).collect();
+        assert!(
+            names.contains(&"anthropic-full"),
+            "should include anthropic-full"
+        );
+    }
+
+    #[test]
+    fn test_resolve_bundled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (yaml, source) = resolve("anthropic/full", dir.path()).unwrap();
+        assert!(yaml.contains("name: anthropic-full"));
+        assert!(source.contains("built-in"));
+    }
+
+    #[test]
+    fn test_resolve_user_overrides_bundled() {
+        let dir = tempfile::tempdir().unwrap();
+        let anthropic_dir = dir.path().join("anthropic");
+        std::fs::create_dir_all(&anthropic_dir).unwrap();
+        std::fs::write(
+            anthropic_dir.join("full.yaml"),
+            "name: anthropic-full\ndescription: \"User override\"\nrules: []\n",
+        )
+        .unwrap();
+
+        let (yaml, source) = resolve("anthropic/full", dir.path()).unwrap();
+        assert!(yaml.contains("User override"));
+        assert!(!source.contains("built-in"));
+    }
+
+    #[test]
+    fn test_resolve_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve("nonexistent/template", dir.path());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"));
+        assert!(err.contains("cs template list"));
     }
 
     #[test]
@@ -529,5 +828,123 @@ mod tests {
                 provider
             );
         }
+    }
+
+    #[test]
+    fn test_validate_valid_template() {
+        let yaml = r#"
+name: test-full
+description: "Test template"
+rules:
+  - effect: permit
+    action: "net:*:api.example.com/*"
+    type: idempotent
+  - effect: forbid
+    action: "net:*:api.example.com/admin/*"
+    reason: "admin endpoints blocked"
+"#;
+        let result = validate(yaml).unwrap();
+        assert_eq!(result.name, "test-full");
+        assert_eq!(result.permits.len(), 1);
+        assert_eq!(result.forbids.len(), 1);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_validate_warnings() {
+        let yaml = r#"
+name: ""
+description: "Bad template"
+rules:
+  - effect: permit
+    action: ""
+    type: badtype
+  - effect: forbid
+    action: "net:*:evil.com/*"
+  - effect: nope
+    action: "net:*:x.com/*"
+"#;
+        let result = validate(yaml).unwrap();
+        assert!(result.warnings.len() >= 3); // empty name, empty action, bad type, no reason, bad effect
+    }
+
+    #[test]
+    fn test_validate_invalid_yaml() {
+        let result = validate("not: valid: yaml: [");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_permit() {
+        let yaml = r#"
+name: test
+rules:
+  - effect: permit
+    action: "net:*:api.example.com/*"
+    type: idempotent
+"#;
+        let verdict = check(yaml, "net:GET:api.example.com/v1/users").unwrap();
+        assert_eq!(
+            verdict,
+            CheckVerdict::Permit("net:*:api.example.com/*".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_forbid_overrides_permit() {
+        let yaml = r#"
+name: test
+rules:
+  - effect: permit
+    action: "net:*:api.example.com/*"
+    type: idempotent
+  - effect: forbid
+    action: "net:*:api.example.com/admin/*"
+    reason: "no admin"
+"#;
+        let verdict = check(yaml, "net:POST:api.example.com/admin/delete").unwrap();
+        assert_eq!(
+            verdict,
+            CheckVerdict::Forbid("net:*:api.example.com/admin/*".to_string())
+        );
+    }
+
+    #[test]
+    fn test_check_no_match() {
+        let yaml = r#"
+name: test
+rules:
+  - effect: permit
+    action: "net:*:api.example.com/*"
+    type: idempotent
+"#;
+        let verdict = check(yaml, "net:GET:api.other.com/foo").unwrap();
+        assert_eq!(verdict, CheckVerdict::NoMatch);
+    }
+
+    #[test]
+    fn test_validate_bundled_templates() {
+        // All bundled templates should validate without warnings.
+        // Walk the embedded dir directly to get the YAML contents.
+        fn check_dir(dir: &Dir) {
+            for file in dir.files() {
+                if file.path().extension().and_then(|e| e.to_str()) != Some("yaml") {
+                    continue;
+                }
+                let contents = file.contents_utf8().unwrap();
+                let result = validate(contents)
+                    .unwrap_or_else(|e| panic!("failed to validate {:?}: {}", file.path(), e));
+                assert!(
+                    result.warnings.is_empty(),
+                    "bundled template {:?} has warnings: {:?}",
+                    file.path(),
+                    result.warnings
+                );
+            }
+            for subdir in dir.dirs() {
+                check_dir(subdir);
+            }
+        }
+        check_dir(&BUNDLED_TEMPLATES);
     }
 }

@@ -27,6 +27,7 @@ tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 webpki-roots = { workspace = true }
 time = { workspace = true }
+include_dir = { workspace = true }
 rusqlite = { workspace = true }
 
 [dev-dependencies]

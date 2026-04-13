@@ -99,28 +99,25 @@ fn handle_template_command(args: &[String], templates_dir: &Path) -> anyhow::Res
         Some("list") => {
             let templates = template::list(templates_dir)?;
             if templates.is_empty() {
-                eprintln!(
-                    "[closedshell] no templates found in {}",
-                    templates_dir.display()
-                );
+                eprintln!("[closedshell] no templates found",);
                 eprintln!("[closedshell] use 'cs template init <provider>' to create one");
                 return Ok(());
             }
             // Print header
-            println!("{:<25} {:<45} {:>5}  PATH", "NAME", "DESCRIPTION", "RULES");
-            println!("{}", "-".repeat(100));
+            println!(
+                "{:<25} {:<40} {:>5}  {:<10}",
+                "NAME", "DESCRIPTION", "RULES", "SOURCE"
+            );
+            println!("{}", "-".repeat(85));
             for t in &templates {
-                let desc = if t.description.len() > 43 {
-                    format!("{}...", &t.description[..40])
+                let desc = if t.description.len() > 38 {
+                    format!("{}...", &t.description[..35])
                 } else {
                     t.description.clone()
                 };
                 println!(
-                    "{:<25} {:<45} {:>5}  {}",
-                    t.name,
-                    desc,
-                    t.rule_count,
-                    t.path.display()
+                    "{:<25} {:<40} {:>5}  {:<10}",
+                    t.name, desc, t.rule_count, t.source,
                 );
             }
             Ok(())
@@ -175,18 +172,132 @@ fn handle_template_command(args: &[String], templates_dir: &Path) -> anyhow::Res
             };
 
             let yaml = template::generate(&log_path, name)?;
+
+            // --save: write to templates dir instead of stdout
+            let save = args.iter().any(|a| a == "--save");
+            if save {
+                let template_name = name.unwrap_or("generated");
+                // Split on '-' to get provider/profile (e.g., "myservice-full" → "myservice/full.yaml")
+                let (dir_name, file_name) = if let Some(dash) = template_name.rfind('-') {
+                    (
+                        &template_name[..dash],
+                        format!("{}.yaml", &template_name[dash + 1..]),
+                    )
+                } else {
+                    (template_name, "full.yaml".to_string())
+                };
+                let dir = templates_dir.join(dir_name);
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join(&file_name);
+                std::fs::write(&path, &yaml)?;
+                eprintln!("[closedshell] saved template: {}", path.display());
+                eprintln!(
+                    "[closedshell] use with: cs --template {}/{}",
+                    dir_name,
+                    file_name.trim_end_matches(".yaml")
+                );
+            } else {
+                print!("{}", yaml);
+            }
+            Ok(())
+        }
+        Some("validate") => {
+            let name = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!("usage: cs template validate <name|path>\n\nValidate a template and show a summary of its rules.")
+            })?;
+            let (yaml, source) = template::resolve(name, templates_dir)?;
+            let result = template::validate(&yaml)?;
+
+            eprintln!("[closedshell] template: {} ({})", result.name, source);
+            if !result.description.is_empty() {
+                eprintln!("[closedshell] {}", result.description);
+            }
+            eprintln!();
+
+            if !result.forbids.is_empty() {
+                println!("FORBID ({}):", result.forbids.len());
+                for pattern in &result.forbids {
+                    println!("  - {}", pattern);
+                }
+                println!();
+            }
+            if !result.permits.is_empty() {
+                println!("PERMIT ({}):", result.permits.len());
+                for pattern in &result.permits {
+                    println!("  + {}", pattern);
+                }
+                println!();
+            }
+
+            if result.warnings.is_empty() {
+                eprintln!(
+                    "[closedshell] valid ({} rules)",
+                    result.permits.len() + result.forbids.len()
+                );
+            } else {
+                eprintln!("[closedshell] {} warning(s):", result.warnings.len());
+                for w in &result.warnings {
+                    eprintln!("  ! {}", w);
+                }
+            }
+            Ok(())
+        }
+        Some("check") => {
+            let name = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: cs template check <name|path> <action>\n\n\
+                     Test whether an action would be permitted, forbidden, or unmatched.\n\n\
+                     examples:\n  \
+                       cs template check anthropic/full net:POST:api.anthropic.com/v1/messages\n  \
+                       cs template check github/readonly net:DELETE:api.github.com/repos/foo"
+                )
+            })?;
+            let action = args.get(2).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: cs template check <name|path> <action>\n\nmissing <action> argument"
+                )
+            })?;
+            let (yaml, _source) = template::resolve(name, templates_dir)?;
+            let verdict = template::check(&yaml, action)?;
+            match verdict {
+                template::CheckVerdict::Permit(pattern) => {
+                    println!("PERMIT — matched: {}", pattern);
+                }
+                template::CheckVerdict::Forbid(pattern) => {
+                    println!("FORBID — matched: {}", pattern);
+                }
+                template::CheckVerdict::NoMatch => {
+                    println!("NO MATCH — would block for human approval");
+                }
+            }
+            Ok(())
+        }
+        Some("show") => {
+            let name = args.get(1).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: cs template show <name|path>\n\nShow the resolved template YAML."
+                )
+            })?;
+            let (yaml, source) = template::resolve(name, templates_dir)?;
+            eprintln!("[closedshell] source: {}", source);
             print!("{}", yaml);
             Ok(())
         }
         Some(other) => {
             anyhow::bail!(
-                "unknown template command: '{}'\n\nusage: cs template <init|list|generate>",
+                "unknown template command: '{}'\n\nusage: cs template <init|list|show|validate|check|generate>",
                 other
             );
         }
         None => {
             anyhow::bail!(
-                "usage: cs template <init|list|generate>\n\n  init <provider>              Scaffold a new template\n  list                         Show available templates\n  generate <session-id>        Generate template from YOLO session log"
+                "usage: cs template <init|list|show|validate|check|generate>\n\n  \
+                 init <provider>              Scaffold a new template\n  \
+                 list                         Show available templates\n  \
+                 show <name|path>             Show resolved template YAML\n  \
+                 validate <name|path>         Validate template and show rule summary\n  \
+                 check <name|path> <action>   Test if an action would be permitted/forbidden\n  \
+                 generate <session-id>        Generate template from YOLO session log"
             );
         }
     }
@@ -400,21 +511,9 @@ async fn main() -> anyhow::Result<()> {
     if !cli.template.is_empty() {
         let templates_dir = config::resolve_tilde(&config.sandbox.templates_dir);
         for name in &cli.template {
-            let raw = std::path::Path::new(name);
-            let path = if raw.exists() {
-                PathBuf::from(name)
-            } else if raw.with_extension("yaml").exists() {
-                raw.with_extension("yaml")
-            } else {
-                let mut p = PathBuf::from(&templates_dir);
-                p.push(format!("{}.yaml", name));
-                p
-            };
-            let yaml = std::fs::read_to_string(&path).map_err(|e| {
-                anyhow::anyhow!("failed to load template {}: {}", path.display(), e)
-            })?;
+            let (yaml, source) = template::resolve(name, &PathBuf::from(&templates_dir))?;
             tree.load_template(&yaml)?;
-            tracing::info!(template = %path.display(), "loaded permission template");
+            tracing::info!(template = %source, "loaded permission template");
         }
     }
 

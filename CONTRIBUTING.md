@@ -36,15 +36,23 @@ Some tests require `ANTHROPIC_KEY` to be set and are skipped in CI.
 
 ## Templates — the easiest way to contribute
 
-Permission templates are YAML files that pre-approve endpoints for specific providers. They don't require any Rust knowledge and are the fastest way to contribute.
+Permission templates are YAML files that pre-approve endpoints for specific providers. They don't require any Rust knowledge and are the fastest way to contribute. Templates in `templates/` are compiled into the binary at build time.
 
 **Adding a template for a new provider:**
 
 ```bash
-cs template init myservice       # scaffold a new template
-# edit templates/myservice/full.yaml
-cs --yolo -- <command>           # run a YOLO session to capture traffic
-cs template generate <session>   # generate template from captured traffic
+cs template init myservice              # scaffold
+$EDITOR ~/.closedshell/templates/myservice/full.yaml
+cs template validate myservice/full     # check for errors
+cs template check myservice/full "net:GET:api.myservice.com/v1/data"  # test actions
+```
+
+Or observe traffic first, then codify:
+
+```bash
+cs --yolo -- <command>                  # capture traffic
+cs template generate <session-id> --name myservice-full --save
+cs template validate myservice/full     # review
 ```
 
 See [templates/CONTRIBUTING.md](templates/CONTRIBUTING.md) for the full format and guidelines.

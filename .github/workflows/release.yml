@@ -34,7 +34,6 @@ jobs:
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             staging=$(mktemp -d)
             cp target/${target}/release/closedshell "${staging}/"
-            cp -r templates "${staging}/"
             tar czf closedshell-${{ github.ref_name }}-${target}.tar.gz -C "${staging}" .
             shasum -a 256 closedshell-${{ github.ref_name }}-${target}.tar.gz > closedshell-${{ github.ref_name }}-${target}.tar.gz.sha256
           done

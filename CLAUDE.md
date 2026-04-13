@@ -53,10 +53,15 @@ cs --template anthropic/full --task "describe what the agent should do" -- claud
 
 **Templates** pre-approve infra the agent needs to function. Without `--template anthropic/full`, Claude Code's own API calls require manual approval in the TUI.
 
-Templates live in `~/.closedshell/templates/` and can also be referenced by absolute path. Bundled templates are in `templates/` in the repo — copy them to `~/.closedshell/templates/` or use `make install`.
+Templates are resolved in order: absolute/relative path → `~/.closedshell/templates/` → built-in (compiled into the binary). Built-in templates (from `templates/` in the repo) work out of the box with no install step. User templates in `~/.closedshell/templates/` override built-in ones with the same name.
 
-Available templates:
+Template commands: `list`, `show`, `validate`, `check`, `init`, `generate`.
+
+Available built-in templates:
 - `anthropic/full` — permits `api.anthropic.com`, `mcp-proxy.anthropic.com`, `downloads.claude.ai`, Claude Code storage
+- `github/full`, `github/readonly` — GitHub API and git operations
+- `exa/full`, `exa/readonly`, `exa/search-only` — Exa search API
+- `openai/full` — OpenAI API endpoints
 
 **`--task`** sets the session task. Displayed in the MOTD and audit log.
 

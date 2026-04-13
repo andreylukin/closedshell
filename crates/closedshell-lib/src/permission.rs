@@ -222,7 +222,7 @@ fn escape_brackets(s: &str) -> String {
     s.replace('[', "\x01").replace(']', "\x02")
 }
 
-fn action_glob_match(pattern: &str, input: &str) -> bool {
+pub fn action_glob_match(pattern: &str, input: &str) -> bool {
     // In action strings (not filesystem paths), a single `*` should match across
     // `/` separators. The `glob_match` crate treats `*` as non-`/`-crossing, so
     // we promote every lone `*` to `**` which matches everything including `/`.
