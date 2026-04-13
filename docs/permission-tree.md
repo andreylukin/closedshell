@@ -299,44 +299,32 @@ For the expected session sizes (< 100 rules), linear scan with string matching i
 
 Templates are reusable rule sets that merge into the session tree at cold start. They provide a starting permission baseline so common actions don't require per-request human approval.
 
-```yaml
-# templates/aws-debug.yaml
-name: aws-debug
-description: "Read-only AWS access for investigation workflows"
-rules:
-  - effect: forbid
-    action: "aws[profile=prod]:*:Delete*"
-    reason: "template: no production deletes"
-  - effect: forbid
-    action: "aws[profile=prod]:*:Terminate*"
-    reason: "template: no production terminates"
-  - effect: permit
-    action: "aws[profile=*]:*:Describe*"
-    type: idempotent
-  - effect: permit
-    action: "aws[profile=*]:*:List*"
-    type: idempotent
-  - effect: permit
-    action: "aws[profile=*]:*:Get*"
-    type: idempotent
+Templates use the `.csp` (ClosedShell Policy) format — a Cedar-inspired declarative syntax:
+
+```
+# templates/anthropic/full.csp
+@name("anthropic-full")
+@description("Allow all Anthropic API, MCP proxy, and Claude Code infra endpoints")
+
+permit (action == "net:*:api.anthropic.com/*");
+permit (action == "net:*:mcp-proxy.anthropic.com/*");
+
+forbid (action == "net:*:api.anthropic.com/admin/*")
+  reason("admin access blocked");
 ```
 
-```yaml
-# templates/github-readonly.yaml
-name: github-readonly
-description: "Read-only GitHub API access"
-rules:
-  - effect: permit
-    action: "gh[*]:repos/*/GET"
-    type: idempotent
-  - effect: permit
-    action: "gh[*]:repos/*/pulls:GET"
-    type: idempotent
+```
+# templates/github/readonly.csp
+@name("github-readonly")
+@description("Allow read-only GitHub API access (GET only)")
+
+permit (action == "net:GET:api.github.com/*");
+permit (action == "net:GET:github.com/*");
 ```
 
 ### Storage
 
-Templates are YAML files in `~/.closedshell/templates/` (configurable via `templates_dir` in config). Each file is a template. The filename (minus `.yaml`) is the template name used with `--template`.
+Built-in templates are compiled into the binary from the `templates/` directory. User templates live in `~/.closedshell/templates/` and override built-in ones with the same name. See [templates/CONTRIBUTING.md](../templates/CONTRIBUTING.md) for the full format reference.
 
 ### Usage
 

@@ -12,68 +12,62 @@
 
 ## The Problem
 
-AI coding agents like Claude Code, Cursor, Codex, and Aider already ask before reading and writing your files. That part's handled.
+AI coding agents already ask before reading and writing your files. That part's handled.
 
-But these agents also run `kubectl`, `terraform`, `aws`, `curl` — and call MCP tools that hit arbitrary APIs. **Nobody's checking those.**
+But they also run `kubectl`, `terraform`, `aws`, `curl` — and call MCP tools that hit arbitrary APIs. **Nobody's checking those.**
 
-Your agent inherits every credential on your machine. AWS keys, GitHub tokens, kubeconfig, gcloud auth — all of it. One bad tool call and you're looking at:
+Your agent inherits every credential on your machine. One bad tool call and you're looking at:
 
 - `kubectl delete deployment production`
 - `aws s3 rm s3://prod-backups --recursive`
 - An MCP skill calling an API you've never heard of, using your credentials
 - A retry loop burning hundreds of dollars in API costs overnight
 
-This isn't hypothetical. A [Replit agent deleted a production database](https://www.reddit.com/r/replit/comments/1l3nnez/replit_agent_deleted_my_entire_database/) after ignoring explicit instructions 11 times. [Amazon Q was compromised](https://www.theregister.com/2025/06/16/amazon_q_developer_attack/) via a poisoned PR that instructed it to terminate EC2 instances and empty S3 buckets. A LangChain agent got stuck in a retry loop and silently ran up $800 in API bills overnight.
+This isn't hypothetical. A [Replit agent deleted a production database](https://www.reddit.com/r/replit/comments/1l3nnez/replit_agent_deleted_my_entire_database/) after ignoring explicit instructions 11 times. [Amazon Q was compromised](https://www.theregister.com/2025/06/16/amazon_q_developer_attack/) via a poisoned PR that instructed it to terminate EC2 instances and empty S3 buckets.
 
 **Agents have file permissions. They have zero network permissions.** ClosedShell fills that gap.
 
 ---
 
-## What ClosedShell Does
+## What It Does
 
-Every outbound HTTPS request from your agent is intercepted before it leaves your machine. Requests are parsed into human-readable actions:
+Every outbound HTTPS request from your agent is intercepted before it leaves your machine, parsed into a human-readable action, and checked against your policy:
 
 ```
-aws:s3:DeleteBucket
-gcp:compute:instances.delete
-net:POST:api.github.com/repos/owner/repo/git/refs
-net:DELETE:api.random-service.com/v1/resources
+aws:s3:DeleteBucket          → DENY (forbid rule)
+net:GET:api.anthropic.com/*  → ALLOW (template)
+net:POST:api.unknown.com/v1  → BLOCK (asks you in the TUI)
 ```
 
-You define what's allowed using simple templates. Everything else blocks and asks you in a live terminal UI. The agent keeps full local access — files, shell, tools. The network is the leash.
+You define what's allowed using simple [templates](templates/CONTRIBUTING.md). Everything else blocks and asks you in a live terminal UI. The agent keeps full local access — files, shell, tools. The network is the leash.
 
-One binary. No root. No kernel extensions. No setup beyond install.
+One binary. No root. No kernel extensions.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install
 brew install andreylukin/tap/closedshell
 
 # Run Claude Code with pre-approved Anthropic + GitHub access
 cs --template anthropic/full --template github/readonly -- claude
 
-# In another terminal, open the TUI to watch live
+# In another terminal, watch live
 cs
 ```
 
-You'll see every API call in real time. Known endpoints (from your templates) flow through automatically. Unknown ones pause and ask you — the proxy holds the connection until you decide, so the agent doesn't retry or error out.
+Known endpoints flow through. Unknown ones pause and ask you — the proxy holds the connection until you decide.
 
-### YOLO mode — log everything, block nothing
-
-If you just want to see what your agent does without blocking anything:
+### YOLO mode — just watch
 
 ```bash
 cs --yolo -- claude
 ```
 
-This is useful for building trust, auditing traffic, or generating a template from real usage (more on that below).
+Logs everything, blocks nothing. Useful for auditing traffic or [generating a template](templates/CONTRIBUTING.md#observe-then-codify-workflow) from real usage.
 
 ### Works with any agent
-
-ClosedShell sandboxes any process — it's not tied to a specific AI tool. Claude Code, Cursor, Aider, Codex, or a custom script that calls APIs. If it makes HTTPS requests, ClosedShell can intercept and control them.
 
 ```bash
 cs --template openai/full -- codex
@@ -83,7 +77,7 @@ cs --template anthropic/full -- python my_agent.py
 
 ---
 
-## How It Actually Works
+## How It Works
 
 ```
 ┌──────────────────────────────────┐
@@ -98,211 +92,90 @@ cs --template anthropic/full -- python my_agent.py
 └──────────────────────────────────┘
 ```
 
-1. **Sandbox.** Your agent runs inside a macOS Seatbelt sandbox. All outbound network is blocked except `localhost:8443`. Files, shell, and local tools work normally.
+1. **Sandbox.** Seatbelt blocks all outbound network except `localhost:8443`. Files and local tools work normally.
+2. **Proxy.** MITM proxy terminates TLS, reads the request, figures out what the agent is doing.
+3. **Parse.** Requests become semantic actions — `POST s3.amazonaws.com/?delete` → `aws:s3:DeleteBucket`. Built-in parsers for AWS, GCP, Azure, K8s, GitHub. Unknown hosts → `net:METHOD:host/path`.
+4. **Decide.** Cedar-inspired policy: **forbid > permit > ask human.** The proxy holds unknown requests while the TUI asks you.
+5. **Persist.** Decisions logged, permissions saved to SQLite, rules carry over between sessions.
 
-2. **Proxy.** Every HTTPS request goes through ClosedShell's MITM proxy on localhost. The proxy terminates TLS (using a locally-generated CA), reads the request, and figures out what the agent is trying to do.
-
-3. **Parse.** The request is converted into a semantic action. `POST s3.amazonaws.com/?delete` becomes `aws:s3:DeleteBucket`. Built-in parsers understand AWS, GCP, Azure, Kubernetes, and GitHub natively. Unknown hosts fall back to `net:METHOD:host/path`.
-
-4. **Decide.** The action is checked against your permission policy. The policy is Cedar-inspired: **forbid overrides permit, default deny.** If a template or prior approval matches, the request flows through. If a forbid rule matches, it's blocked. If nothing matches, the proxy holds the connection and the TUI asks you.
-
-5. **Persist.** Every decision is logged. Permissions you grant are saved to SQLite and carry over when you resume work in the same directory. One-shot approvals are consumed after use.
+Deep dive: [architecture.md](docs/architecture.md) | [proxy.md](docs/proxy.md) | [permission-tree.md](docs/permission-tree.md)
 
 ---
 
 ## Templates
 
-Instead of approving every single API call, templates pre-approve the endpoints your agent obviously needs to function. Without `--template anthropic/full`, even Claude Code's own API calls would require manual approval.
+Templates pre-approve endpoints your agent needs. Without `--template anthropic/full`, even Claude Code's own API calls require manual approval.
 
-### Built-in templates
-
-These ship compiled into the binary — no setup needed.
+### Built-in
 
 | Template | What it permits |
 |----------|----------------|
 | `anthropic/full` | `api.anthropic.com`, `mcp-proxy.anthropic.com`, `downloads.claude.ai`, Claude Code storage |
-| `openai/full` | `api.openai.com` (all endpoints — GPT, Codex CLI, assistants, files) |
+| `openai/full` | `api.openai.com` (all endpoints) |
 | `github/full` | `api.github.com`, `github.com`, `uploads.github.com` |
-| `github/readonly` | `api.github.com` and `github.com` (GET only) |
+| `github/readonly` | GitHub (GET only) |
 | `exa/full` | `api.exa.ai` (all endpoints) |
 | `exa/readonly` | `api.exa.ai` (read-only) |
 | `exa/search-only` | `api.exa.ai` (search only) |
 
-### Template format
+### Create your own
 
-Templates use a Cedar-inspired `.csp` (ClosedShell Policy) format:
-
-```
-@name("anthropic-full")
-@description("Allow all Anthropic API, MCP proxy, and Claude Code infra endpoints")
-
-// Core API
-permit (action == "net:*:api.anthropic.com/*");
-
-// MCP proxy
-permit (action == "net:*:mcp-proxy.anthropic.com/*");
-
-// Block admin endpoints
-forbid (action == "net:*:api.anthropic.com/admin/*")
-  reason("admin access blocked");
-```
-
-`forbid` always wins over `permit`. This means you can broadly allow a service and then carve out specific dangerous operations.
-
-### Create your own templates
-
-The easiest way: run your agent in YOLO mode, then generate a template from the traffic you observed.
+Run in YOLO mode, then generate a template from observed traffic:
 
 ```bash
-# 1. Run in YOLO mode to capture real traffic
 cs --yolo -- claude
-
-# 2. Generate a template from what you saw
 cs template generate <session-id> --name myservice-full --save
-
-# 3. Review it
 cs template show myservice/full
-
-# 4. Use it
-cs --template myservice/full -- claude
 ```
 
-Or scaffold one manually:
-
-```bash
-cs template init myservice
-# → creates ~/.closedshell/templates/myservice/full.csp
-```
-
-### Template resolution
-
-When you pass `--template myservice/full`, ClosedShell looks in order:
-
-1. Exact file path (absolute or relative)
-2. `~/.closedshell/templates/myservice/full.csp` (your custom templates)
-3. Built-in templates (compiled into the binary)
-
-User templates override built-in ones with the same name.
-
-### Template management
+Templates use a Cedar-inspired `.csp` format — `forbid` always overrides `permit`:
 
 ```
-cs template list                         Show all templates (built-in and user)
-cs template show <name>                  Display resolved template content
-cs template validate <name>              Validate and show rule summary
-cs template check <name> <action>        Test if an action would be permitted/forbidden
-cs template init <provider>              Scaffold a new template
-cs template generate <session-id>        Generate from a YOLO session's audit log
+@name("myservice-full")
+permit (action == "net:*:api.myservice.com/*");
+forbid (action == "net:*:api.myservice.com/admin/*");
 ```
 
-See [templates/CONTRIBUTING.md](templates/CONTRIBUTING.md) for the full format reference.
-
----
-
-## The TUI
-
-### Hub — browse sessions and templates
-
-```bash
-cs
-```
-
-Running `cs` with no arguments opens the hub — a unified view of all your sessions and available templates. Switch between tabs with `Tab`.
-
-- **Sessions tab**: browse past and running sessions with status, workdir, templates used, and decision counts. Press `Enter` to open a session's live monitor.
-- **Templates tab**: browse all available templates (built-in and user). Press `Enter` to view the full policy.
-
-### Session monitor — watch a live session
-
-```bash
-cs --tui <session-id>
-```
-
-Three tabs for the active session:
-
-- **Live**: real-time activity feed — every API call, color-coded by result (allow/deny/pending), filterable with `f`, searchable with `/`
-- **Policy**: loaded permission rules from templates and human approvals
-- **Approvals**: pending requests waiting for your decision (`y` approve, `n` deny)
-
-Press `?` for a help overlay with all keybindings.
-
----
-
-## Why Network, Not Files?
-
-**File access** is a solved problem. Claude Code asks before reading and writing files. Cursor has its own permission model. Every major coding agent has some form of local file sandboxing.
-
-**Network calls** are the blind spot. When your agent runs `kubectl delete deployment`, `terraform destroy`, or an MCP tool calls a random API — nothing checks. No agent has a permission model for outbound network traffic. Your credentials flow freely to whatever endpoint the agent decides to hit.
-
-ClosedShell fills this gap. It's templatized network permissions for the tools developers actually use — AWS, GCP, Kubernetes, GitHub, Terraform, and anything else that makes HTTPS calls. It's the missing layer, not a replacement for file-level sandboxing.
+Full format reference: [templates/CONTRIBUTING.md](templates/CONTRIBUTING.md)
 
 ---
 
 ## Install
 
 **Homebrew:**
-
 ```bash
 brew install andreylukin/tap/closedshell
 ```
 
-**Pre-built binaries:** Download from [GitHub Releases](https://github.com/andreylukin/closedshell/releases) (Apple Silicon and Intel).
+**Pre-built binaries:** [GitHub Releases](https://github.com/andreylukin/closedshell/releases) (Apple Silicon + Intel)
 
 **From source:**
-
 ```bash
 git clone https://github.com/andreylukin/closedshell.git
-cd closedshell
-make install    # builds and installs to ~/.cargo/bin
+cd closedshell && make install
 ```
 
 ---
 
-## CLI Reference
+## Reference
 
 ```
-closedshell [OPTIONS] [COMMAND]...
+cs [OPTIONS] [COMMAND]...
 
-Options:
-  --template <TEMPLATE>  Permission template to load (repeatable)
-  --yolo                 Log-only mode — no blocking
-  --resume               Resume rules from previous session in this directory
-  --pf                   Enable pf (packet filter) as secondary enforcement (requires root)
-  --pf-setup             One-time system setup for pf enforcement
-  --tui <SESSION_ID>     Open the TUI monitor for an existing session
+  --template <TEMPLATE>  Permission template (repeatable)
+  --yolo                 Log-only mode
+  --resume               Resume previous session rules
+  --pf                   Enable pf secondary enforcement (requires root)
+  --tui <SESSION_ID>     Open TUI for existing session
+
+cs template list|show|validate|check|init|generate
 ```
 
----
+Config: `./closedshell.yaml` or `~/.closedshell/config.yaml`
 
-## Configuration
-
-```yaml
-# closedshell.yaml (./closedshell.yaml → ~/.closedshell/config.yaml)
-
-sandbox:
-  yolo: false
-  passthrough_env:
-    - OPENAI_API_KEY
-    - GITHUB_TOKEN
-    - AWS_ACCESS_KEY_ID
-    - AWS_SECRET_ACCESS_KEY
-```
-
----
-
-## Architecture
-
-```
-crates/
-  closedshell-lib/   # shared library (config, parsers, proxy, audit, tls, sandbox)
-  closedshell/       # host binary (CLI + daemon + TUI)
-templates/           # bundled permission templates (.csp format)
-docs/                # design docs
-```
-
-| Doc | Description |
-|-----|-------------|
+| Doc | |
+|-----|-|
 | [architecture.md](docs/architecture.md) | Seatbelt sandbox + proxy design |
 | [permission-tree.md](docs/permission-tree.md) | Permission model and evaluation |
 | [proxy.md](docs/proxy.md) | HTTPS proxy and provider parsers |
-| [development.md](docs/development.md) | Build sections and dependency graph |
+| [development.md](docs/development.md) | Building and testing |
