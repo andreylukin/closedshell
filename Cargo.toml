@@ -36,6 +36,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tempfile = "3"
 time = "0.3"
 include_dir = "0.7"
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 libc = "0.2"
