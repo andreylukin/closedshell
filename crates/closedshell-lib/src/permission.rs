@@ -164,7 +164,7 @@ impl PermissionTree {
     }
 
     /// Returns true if any non-expired forbid rule matches the action.
-    /// Used by JudgeDecider to distinguish "forbidden" (hard deny) from "no permit" (consult judge).
+    /// Used by EnforcingDecider to distinguish "forbidden" (hard deny) from "no permit" (queue for human approval).
     pub fn has_forbid(&self, action_canonical: &str) -> bool {
         let rules = self.rules.read().unwrap();
         let now = Utc::now();

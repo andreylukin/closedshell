@@ -18,7 +18,7 @@ Instead, please report via [GitHub Security Advisories](https://github.com/andre
 - Proxy bypasses (traffic reaching the network without passing through the MITM proxy)
 - Permission tree violations (actions allowed despite explicit forbid rules)
 - TLS interception flaws (certificate validation issues, key leakage)
-- Judge manipulation (prompt injection causing incorrect permit/deny decisions)
+- IPC manipulation (unauthorized approval of pending actions)
 
 ### Response Timeline
 

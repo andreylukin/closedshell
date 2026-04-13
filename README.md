@@ -10,7 +10,7 @@ A macOS sandbox for AI coding agents. Instead of restricting what tools an agent
 
 The agent gets full access to your local tools, files, and shell. The network is the leash.
 
-No root. No kernel extensions. Two static Rust binaries.
+No root. No kernel extensions. One static Rust binary.
 
 ---
 
@@ -33,15 +33,15 @@ No root. No kernel extensions. Two static Rust binaries.
 2. Env-var proxy forces HTTPS through the host-side MITM proxy
 3. Proxy terminates TLS, parses API calls into canonical actions (e.g. `aws:s3:ListBuckets`)
 4. Actions are checked against a Cedar-inspired permission tree (forbid overrides permit, default deny)
-5. Unknown actions consult an LLM judge — the proxy holds the request while the judge decides (no agent retries)
-6. Decisions are persisted to SQLite; a TUI shows live session activity
+5. Unknown actions block for human approval via TUI — the proxy holds the request (no agent retries needed)
+6. Decisions are persisted to SQLite; a TUI shows live session activity and pending approvals
 
 ---
 
 ## Quick Start
 
 ```bash
-make install    # builds and installs closedshell + ask to ~/.cargo/bin
+make install    # builds and installs closedshell to ~/.cargo/bin
 ```
 
 ### YOLO mode — log everything, block nothing
@@ -50,13 +50,13 @@ make install    # builds and installs closedshell + ask to ~/.cargo/bin
 cs --yolo -- claude
 ```
 
-### Enforcing mode — judge evaluates unknown actions against a task description
+### Enforcing mode — unknown actions block for human approval
 
 ```bash
 cs --template anthropic/full --task "refactor the auth module" -- claude
 ```
 
-Templates pre-approve infrastructure the agent needs to function. Without `--template anthropic/full`, Claude Code's own API calls would get blocked by the judge.
+Templates pre-approve infrastructure the agent needs to function. Without `--template anthropic/full`, Claude Code's own API calls would require manual approval in the TUI.
 
 ### TUI — monitor a live session
 
@@ -81,7 +81,7 @@ closedshell [OPTIONS] [COMMAND]...
 
 Options:
   --template <TEMPLATE>  Permission template to load (repeatable)
-  --task <TASK>          Session task description for the judge
+  --task <TASK>          Session task description (shown in MOTD and audit log)
   --yolo                 Log-only mode — no blocking
   --resume               Resume rules from previous session in this directory
   --allow <ALLOW>        Allow actions matching this glob pattern (repeatable)
@@ -114,18 +114,12 @@ Or reference by absolute path: `--template /path/to/template.yaml`
 # closedshell.yaml (./closedshell.yaml → ~/.closedshell/config.yaml)
 
 sandbox:
-  implicit_ask: true
   yolo: false
   passthrough_env:
     - OPENAI_API_KEY
     - GITHUB_TOKEN
     - AWS_ACCESS_KEY_ID
     - AWS_SECRET_ACCESS_KEY
-
-judge:
-  api_base: "http://localhost:11434/v1"
-  model: "qwen3:8b"
-  timeout_ms: 5000
 ```
 
 ---
@@ -147,7 +141,6 @@ make check      # fmt + lint + test (what CI runs)
 crates/
   closedshell-lib/   # shared library (config, parsers, proxy, audit, tls, sandbox)
   closedshell/       # host binary (CLI + daemon + TUI)
-  ask/               # in-sandbox binary
 templates/           # bundled permission templates
 docs/                # design docs
 ```
@@ -156,7 +149,5 @@ docs/                # design docs
 |-----|-------------|
 | [architecture.md](docs/architecture.md) | Seatbelt sandbox + proxy design |
 | [permission-tree.md](docs/permission-tree.md) | Permission model and evaluation |
-| [judge.md](docs/judge.md) | LLM judge config and protocol |
 | [proxy.md](docs/proxy.md) | HTTPS proxy and provider parsers |
 | [development.md](docs/development.md) | Build sections and dependency graph |
-| [agent-instructions.md](docs/agent-instructions.md) | Agent instruction injection |

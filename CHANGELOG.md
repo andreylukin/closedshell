@@ -11,11 +11,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Seatbelt sandbox enforcement for macOS
 - HTTPS MITM proxy with SNI-based TLS termination
 - Permission tree (Cedar-inspired: forbid-overrides-permit, default deny)
-- LLM judge for evaluating unknown network actions against task scope
+- Deterministic enforcement: template permits → allow, explicit forbids → deny, unknown → block for human approval
 - Provider parsers: AWS, GCP, Azure, Kubernetes, GitHub, Anthropic, Exa
 - YOLO mode — log all HTTPS traffic, block nothing
-- Enforcing mode with task-scoped judge evaluation
 - Template system for pre-approved permissions
-- `ask` binary for in-sandbox permission queries
-- TUI for real-time session monitoring
+- TUI for real-time session monitoring and human approval of unknown actions
 - Packet filter (pf) as secondary network enforcement layer

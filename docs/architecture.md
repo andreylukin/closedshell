@@ -11,19 +11,19 @@
 │  macOS Host                                             │
 │                                                         │
 │  closedshell daemon (Rust)                              │
-│  ┌────────────┐ ┌──────────┐ ┌───────────────────────┐ │
-│  │ Permission  │ │ Judge    │ │ MITM Proxy            │ │
-│  │ Tree        │ │ (OpenAI  │ │ (rustls + hyper)      │ │
-│  │             │ │  compat) │ │                       │ │
-│  │ allow/deny  │ │ approve/ │ │ SNI peek → dynamic    │ │
-│  │ + implicit  │ │ escalate/│ │ cert → parse API call │ │
-│  │   ask       │ │ deny     │ │ → check permissions   │ │
-│  └──────┬─────┘ └────┬─────┘ └───────────┬───────────┘ │
-│         │            │                    │             │
-│         └────────────┴────────────────────┘             │
-│                       ▲                                 │
-│              Unix socket + localhost:8443                │
-│                       │                                 │
+│  ┌────────────┐ ┌───────────────────────┐               │
+│  │ Permission  │ │ MITM Proxy            │               │
+│  │ Tree        │ │ (rustls + hyper)      │               │
+│  │             │ │                       │               │
+│  │ allow/deny  │ │ SNI peek → dynamic    │               │
+│  │ + human     │ │ cert → parse API call │               │
+│  │   approval  │ │ → check permissions   │               │
+│  └──────┬─────┘ └───────────┬───────────┘               │
+│         │                    │                           │
+│         └────────────────────┘                           │
+│                       ▲                                  │
+│              Unix socket + localhost:8443                 │
+│                       │                                  │
 │  ┌────────────────────┴────────────────────────────────┐│
 │  │  Sandboxed Shell (sandbox-exec)                     ││
 │  │                                                     ││
@@ -31,8 +31,6 @@
 │  │  • deny network-outbound (except localhost:8443)    ││
 │  │                                                     ││
 │  │  HTTP_PROXY / HTTPS_PROXY → localhost:8443          ││
-│  │                                                     ││
-│  │  Agent ←→ `ask` CLI ←→ Unix Socket (read-only)     ││
 │  └─────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────┘
 ```
@@ -66,8 +64,8 @@ The proxy then:
 4. Terminates TLS → reads HTTP request
 5. Parses the request into a canonical action (`aws:s3:ListBuckets`, `gh:repos/*/pulls:POST`, etc.)
 6. Checks the permission tree
-7. If unknown → implicit ask to judge → approve/escalate/deny
-8. If approved → establishes upstream TLS, forwards request as-is (credentials pass through), relays response
+7. If permitted → forward. If forbidden → deny. If unknown → block for human approval via TUI.
+8. If approved → adds rule to tree, establishes upstream TLS, forwards request as-is (credentials pass through), relays response
 
 ```
 Agent runs: aws s3 ls
@@ -75,10 +73,11 @@ Agent runs: aws s3 ls
   ├─ aws CLI honors HTTPS_PROXY → connects to localhost:8443
   │
   ├─ Proxy: TLS terminate → parse → aws:s3:ListBuckets
-  │   ├─ Tree hit? → forward (fast path, ~1ms)
-  │   └─ Tree miss? → implicit ask → judge → approve → add to tree → forward
+  │   ├─ Tree permit? → forward (fast path, ~1ms)
+  │   ├─ Tree forbid? → deny (hard block)
+  │   └─ No match? → block for human approval in TUI → approve → add to tree → forward
   │
-  └─ Agent gets response. Total added latency: ~1ms (cached) / ~100ms (first access)
+  └─ Agent gets response. Total added latency: ~1ms (cached) / human approval time (first access)
 ```
 
 ### Process Execution (future phase)
@@ -116,7 +115,7 @@ closedshell <agent-command>
 3. Write combined trust store (CA + system roots) to sandbox tmpdir
 4. Generate seatbelt profile (.sb file)
 5. Start MITM proxy on localhost:8443
-6. Start Unix socket listener for `ask` CLI
+6. Start Unix socket listener for TUI IPC
 7. Exec:
    sandbox-exec -f /tmp/closedshell-XXXX/profile.sb \
      env HTTPS_PROXY=http://localhost:8443 \
@@ -126,7 +125,7 @@ closedshell <agent-command>
      -- <agent-command>
 8. Print MOTD (if enabled)
 9. Open audit log: $PWD/closedshell-$SESSION_ID.log
-10. Agent runs. All HTTPS → proxy. `ask` CLI → Unix socket.
+10. Agent runs. All HTTPS → proxy. TUI connects via Unix socket.
 11. On exit: tear down proxy, remove tmpdir. Permission tree + session metadata persisted to SQLite.
    Log file persists.
 ```
@@ -214,7 +213,7 @@ closedshell [flags] <command> [args...]
 
 | Flag | Description |
 |------|-------------|
-| `--task <text>` | Set session task (used by judge for scope detection) |
+| `--task <text>` | Set session task (displayed in MOTD and audit log) |
 | `--template <name>` | Load permission template (repeatable) |
 | `--yolo` | Log-only mode — no blocking (see [§ YOLO Mode](#yolo-mode)) |
 | `--no-motd` | Suppress MOTD on start |
@@ -240,18 +239,18 @@ The TUI is the management interface. It runs in a separate terminal from the san
 
 #### Session detail (select or `closedshell 8f3a`)
 
-Tabs: **live**, **rules**, **approvals**, **history**
+Tabs: **live**, **rules**, **approvals**
 
 **Live tab** — streaming decisions in real time:
 
 ```
 ┌─ 8f3a ~/repos/myproject ──────────────────────────────────┐
-│ [l]ive  [r]ules  [a]pprovals  [h]istory                   │
+│ [l]ive  [r]ules  [a]pprovals                               │
 ├───────────────────────────────────────────────────────────┤
-│ 14:32:01 ✓ aws[profile=dev]:s3:ListBuckets      template │
-│ 14:32:03 ✓ aws[profile=dev]:ec2:Describe*        judge   │
-│ 14:32:05 ✗ aws[profile=prod]:ec2:Terminate*      forbid  │
-│ 14:32:08 ? aws[profile=prod]:ecs:UpdateService   pending │
+│ 14:32:01 ✓ aws[profile=dev]:s3:ListBuckets      tree     │
+│ 14:32:03 ✓ aws[profile=dev]:ec2:Describe*        tree     │
+│ 14:32:05 ✗ aws[profile=prod]:ec2:Terminate*      tree     │
+│ 14:32:08 ? aws[profile=prod]:ecs:UpdateService   pending  │
 │                                                           │
 │ [y] approve  [n] deny  [f] forbid  [e] edit rules        │
 └───────────────────────────────────────────────────────────┘
@@ -280,25 +279,10 @@ Tabs: **live**, **rules**, **approvals**, **history**
 ┌─ 8f3a approvals ──────────────────────────────────────────┐
 │ PENDING (1)                                               │
 │  → aws[profile=prod]:ecs:UpdateService                    │
-│    risk: moderate | judge: escalate_human                  │
-│    plan: "rollback ECS deployment" (plan-013)              │
+│    risk: moderate                                          │
 │    waiting: 45s                                            │
 │                                                           │
-│ [y] approve  [n] deny  [i] inspect plan                   │
-└───────────────────────────────────────────────────────────┘
-```
-
-**History tab** — scrollable audit log:
-
-```
-┌─ 8f3a history ────────────────────────────────────────────┐
-│ 14:30:00 session_start  pi  templates: [aws-debug]        │
-│ 14:32:01 ✓ aws[profile=dev]:s3:ListBuckets      1ms      │
-│ 14:32:03 ✓ aws[profile=dev]:ec2:Describe*        87ms    │
-│ 14:32:05 ✗ aws[profile=prod]:ec2:Terminate*      0ms     │
-│ 14:32:08 ? aws[profile=prod]:ecs:UpdateService   pending │
-│                                                           │
-│ [/] search  [↑↓] scroll  [enter] detail                   │
+│ [y] approve  [n] deny                                     │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -322,7 +306,6 @@ Forbid rules from org baseline or templates cannot be removed via edit — they'
 | `l` | session | switch to live tab |
 | `r` | session | switch to rules tab |
 | `a` | session | switch to approvals tab |
-| `h` | session | switch to history tab |
 | `y` | live/approvals | approve pending request |
 | `n` | live/approvals | deny pending request |
 | `f` | live/rules | add forbid rule (inline prompt) |
@@ -343,7 +326,7 @@ One-shot rules that were consumed are deleted from the `rules` table on persist.
 
 ## YOLO Mode
 
-`yolo: true` in config or `closedshell --yolo pi` on the command line. The proxy still intercepts and parses every request, but **never blocks**. All decisions are logged as `allow (yolo)`. The judge is not consulted. Forbid rules are still evaluated and logged as `would_deny (yolo)` but don't block.
+`yolo: true` in config or `closedshell --yolo pi` on the command line. The proxy still intercepts and parses every request, but **never blocks**. All decisions are logged as `allow (yolo)`. Forbid rules are still evaluated and logged as `would_deny (yolo)` but don't block.
 
 Use case: dev environments where you want visibility into what the agent is doing without friction. You can review the audit log after the fact and use it to build templates for production sessions.
 
@@ -367,7 +350,7 @@ New sessions show `(new)` instead of `(resumed)`. Kept terse — one line per fa
 
 ---
 
-## IPC Protocol (`ask` ↔ daemon)
+## IPC Protocol (TUI ↔ daemon)
 
 Unix socket, newline-delimited JSON. One request, one response. No streaming, no multiplexing.
 
@@ -375,40 +358,32 @@ Unix socket, newline-delimited JSON. One request, one response. No streaming, no
 
 ```json
 {"type": "status"}
-{"type": "what_can_i", "pattern": "aws[profile=*]:s3:*"}
-{"type": "why_denied"}
-{"type": "allow", "action": "aws[profile=dev]:ec2:DescribeInstances"}
-{"type": "plan", "description": "rollback ECS deployment in us-east-1"}
-{"type": "context", "task": "now rolling back ECS deployment"}
-{"type": "read", "path": "/Users/alice/repos/myproject/src/main.rs"}
-{"type": "write", "path": "/Users/alice/repos/myproject/out.json", "content": "..."}
+{"type": "pending_approvals"}
+{"type": "approve", "id": "..."}
+{"type": "deny", "id": "...", "reason": "optional reason"}
+{"type": "delete_rule", "rule_id": "..."}
 ```
 
 ### Response
 
 ```json
 {"ok": true, "data": ...}
-{"ok": false, "error": "not_permitted", "message": "no matching permission", "hint": "ask plan \"describe your goal\""}
+{"ok": false, "error": "not_found", "message": "...", "hint": "..."}
 ```
 
 `data` varies by request type:
 - `status` → `{"rules": [...]}` (current permission tree)
-- `what_can_i` → `{"matches": [...]}` (matching rules, no side effects)
-- `why_denied` → `{"action": "...", "reason": "...", "risk_tier": "...", "hint": "..."}`
-- `allow` → `{"rule": {...}}` (the granted rule) or error
-- `plan` → `{"plan_id": "...", "auto_approved": [...], "pending_human": [...]}`
-- `context` → `{"task": "..."}` (updated session context)
-- `read` → `{"content": "..."}` or error
-- `write` → `{"bytes_written": N}` or error
+- `pending_approvals` → `{"pending": [...]}` (actions waiting for human review)
+- `approve` → `{"approved": true, "action": "..."}`
+- `deny` → `{"denied": true, "action": "..."}`
+- `delete_rule` → `{"deleted": true, "rule_id": "..."}`
 
 ### Error codes
 
 | Code | Meaning |
 |------|---------|
-| `not_permitted` | Permission tree denied the action |
-| `pending_approval` | Queued for human approval, not yet resolved |
-| `invalid_request` | Malformed request |
-| `internal_error` | Daemon-side failure |
+| `not_found` | Rule or approval ID not found |
+| `parse_error` | Malformed request |
 
 ---
 
@@ -420,7 +395,7 @@ The agent can read this file (seatbelt allows reads) — that's fine per the thr
 
 ### Events
 
-Every proxy decision and `ask` CLI interaction produces a log entry. Common envelope:
+Every proxy decision produces a log entry. Common envelope:
 
 ```json
 {
@@ -471,44 +446,17 @@ Every proxy decision and `ask` CLI interaction produces a log entry. Common enve
 }
 ```
 
-**`judge`** — every judge invocation (implicit ask or explicit):
+**`human_approval`** — human approved or denied an action via TUI:
 
 ```json
 {
   "ts": "2026-04-04T14:32:03.450Z",
   "session": "8f3a-29c1",
-  "event": "judge",
+  "event": "human_approval",
   "action": "aws[profile=dev]:ec2:DescribeInstances",
-  "decision": "approve",
+  "verdict": "approved",
   "risk_tier": "safe",
-  "latency_ms": 87,
-  "implicit": true
-}
-```
-
-**`plan`** — plan submitted and processed:
-
-```json
-{
-  "ts": "2026-04-04T14:35:00.000Z",
-  "session": "8f3a-29c1",
-  "event": "plan",
-  "plan_id": "plan-013",
-  "description": "rollback ECS deployment",
-  "auto_approved": 2,
-  "pending_human": 1
-}
-```
-
-**`context`** — session task updated via `ask context`:
-
-```json
-{
-  "ts": "2026-04-04T14:40:00.000Z",
-  "session": "8f3a-29c1",
-  "event": "context",
-  "old_task": "investigate 503s in us-east-1",
-  "new_task": "rollback ECS deployment"
+  "wait_ms": 2340
 }
 ```
 
@@ -517,21 +465,6 @@ Every proxy decision and `ask` CLI interaction produces a log entry. Common enve
 ```json
 {"ts": "...", "session": "8f3a-29c1", "event": "session_start", "command": "claude-code", "templates": ["aws-debug"]}
 {"ts": "...", "session": "8f3a-29c1", "event": "session_end", "duration_s": 1823, "total_decisions": 47, "denied": 3}
-```
-
-**`file_io`** — `ask read` / `ask write` operations:
-
-```json
-{
-  "ts": "2026-04-04T14:33:00.000Z",
-  "session": "8f3a-29c1",
-  "event": "file_io",
-  "op": "write",
-  "path": "/Users/alice/repos/myproject/out.json",
-  "result": "allow",
-  "bytes": 1024,
-  "decided_by": "p-003"
-}
 ```
 
 ### What's NOT logged
@@ -550,9 +483,8 @@ Every proxy decision and `ask` CLI interaction produces a log entry. Common enve
 | `rustls` | TLS termination + upstream TLS |
 | `rcgen` | Persistent CA + dynamic leaf cert generation per SNI |
 | `hyper` | HTTP parsing in the proxy |
-| `reqwest` | Judge client (OpenAI-compatible API calls) |
 | `serde` / `serde_yaml` | Config, permission tree serialization |
-| `clap` | CLI argument parsing for both binaries |
+| `clap` | CLI argument parsing |
 
 No special crate for seatbelt — the profile is a generated `.sb` file passed to `sandbox-exec` via `std::process::Command`.
 
@@ -561,8 +493,7 @@ No special crate for seatbelt — the profile is a generated `.sb` file passed t
 ## Binaries
 
 ```
-closedshell    (host-side daemon + proxy + CLI)
-ask            (in-sandbox CLI, talks to daemon over Unix socket)
+closedshell    (host-side daemon + proxy + CLI + TUI)
 ```
 
 ---
@@ -584,7 +515,7 @@ The proxy is the real enforcement boundary, and it works identically on both pla
 
 ## Future: Hardened Mode (Apple Containers)
 
-For untrusted agents requiring VM-level isolation, launch inside an Apple Container (Virtualization.framework). Same proxy, same judge, same `ask` CLI — just swap the process wrapper. The agent runs in a lightweight Linux VM with full namespace/seccomp support internally.
+For untrusted agents requiring VM-level isolation, launch inside an Apple Container (Virtualization.framework). Same proxy, same permission tree — just swap the process wrapper. The agent runs in a lightweight Linux VM with full namespace/seccomp support internally.
 
 This is deferred. The seatbelt path covers the primary use case.
 
@@ -607,7 +538,7 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | # | Test | Pass condition |
 |---|------|---------------|
 | P1 | Agent runs `curl https://httpbin.org/get` through proxy | Proxy intercepts: TLS terminated with persistent CA, request logged, action parsed as `net:GET:httpbin.org/get` |
-| P2 | Agent runs `aws s3 ls` through proxy (no permission in tree) | Proxy parses `aws[profile=...]:s3:ListBuckets`, returns deny (no judge yet in Section 1) |
+| P2 | Agent runs `aws s3 ls` through proxy (no permission in tree) | Proxy parses `aws[profile=...]:s3:ListBuckets`, blocks for human approval |
 | P3 | Manually add `permit aws[profile=*]:s3:List*` to tree, re-run `aws s3 ls` | Proxy matches permit, forwards request, agent gets bucket list |
 | P4 | Agent makes request to unknown host | Proxy parses as `net:METHOD:host/path`, returns deny |
 | P5 | Verify CA is persistent | Two `closedshell` invocations reuse the same CA from `~/.closedshell/ca.pem` |
@@ -622,14 +553,14 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | L3 | `closedshell pi` with `passthrough_env` in config | Configured env vars available inside sandbox |
 | L4 | Kill daemon while agent is running | Agent's next network call fails cleanly (connection refused, not hang) |
 
-### `ask` CLI + IPC
+### TUI + IPC
 
 | # | Test | Pass condition |
 |---|------|---------------|
-| A1 | `ask status` inside sandbox | Returns current permission tree (empty initially) as formatted output |
-| A2 | `ask status` outside sandbox (no socket) | Clean error: "not running inside closedshell" |
-| A3 | `ask what-can-i "aws[profile=*]:s3:*"` | Returns matching rules from tree, no permission request submitted |
-| A4 | `ask why-denied` after a denial | Returns last denial reason with action, risk tier, and hint |
+| A1 | TUI connects to running session | Shows current rules and live activity |
+| A2 | Unknown action triggers pending approval | Action appears in TUI approvals tab, proxy blocks |
+| A3 | Human approves in TUI | Rule added to tree, proxy forwards request |
+| A4 | Human denies in TUI | Proxy returns 403 to agent |
 
 ### Permission Tree (unit tests, no sandbox needed)
 
@@ -648,27 +579,15 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | T13 | Permit `file:write:/Users/alice/repos/*`, evaluate `file:write:/Users/alice/repos/foo.txt` | ALLOW |
 | T14 | No permit for `file:write:/etc/passwd`, evaluate | DENY (default deny) |
 
-### File I/O
-
-| # | Test | Pass condition |
-|---|------|---------------|
-| F1 | Agent runs `ask write /Users/alice/repos/test.txt "hello"` with matching permit | Daemon writes file on host side, agent gets confirmation |
-| F2 | Agent runs `ask write /Users/alice/.ssh/config "..."` with forbid on dotfiles | DENY, file not written |
-| F3 | Agent runs `echo hi > /Users/alice/repos/test.txt` directly (no `ask`) | Succeeds — file-write restrictions deferred to future phase |
-| F4 | Agent runs `cat /Users/alice/repos/test.txt` directly | Succeeds — Seatbelt allows reads |
-| F5 | Agent runs `ask read /Users/alice/.ssh/id_rsa` with forbid on `.ssh/*` | DENY, content not returned |
-| F6 | Agent runs `cat /Users/alice/.ssh/id_rsa` directly | Succeeds (Seatbelt allows reads) — this is the audit gap we accept |
-
 ### End-to-End (requires all sections)
 
 | # | Test | Pass condition |
 |---|------|---------------|
 | E1 | Agent runs `aws s3 ls` in fresh session with `aws-debug` template | Template permits `List*` → proxy forwards → agent gets response, < 5ms added latency |
-| E2 | Agent runs `aws s3 rm s3://bucket/key` in session with `aws-debug` template | Template forbids `Delete*` → DENY with reason, judge never consulted |
-| E3 | Agent runs `aws ec2 describe-instances` (no template, implicit ask enabled) | Proxy holds request → judge approves → permit added → agent gets response, < 200ms |
-| E4 | Agent runs `aws ec2 terminate-instances` (implicit ask) | Judge returns `escalate_human` → DENY with hint to `ask plan` |
-| E5 | Agent runs `ask plan "investigate 503s"` → human approves | Plan rules added to tree, agent runs approved commands at full speed |
-| E6 | One-shot consumed → agent retries same action | Second attempt denied, agent told to re-request |
+| E2 | Agent runs `aws s3 rm s3://bucket/key` in session with `aws-debug` template | Template forbids `Delete*` → DENY, hard block |
+| E3 | Agent runs `aws ec2 describe-instances` (no template) | Proxy holds request → appears in TUI → human approves → permit added → agent gets response |
+| E4 | Agent runs `aws ec2 terminate-instances` → human denies in TUI | DENY returned to agent |
+| E5 | One-shot consumed → agent retries same action | Second attempt denied, agent told to re-request |
 
 ---
 
@@ -681,5 +600,4 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | Network egress | All traffic forced through proxy | No network without proxy |
 | API enforcement | L7 proxy parsing + permission tree | Catches all HTTP |
 | Credential isolation | Mounted in sandbox, but proxy enforces | Agent can't bypass proxy |
-| Judge isolation | Structured input only, single model | Agent can't prompt-inject judge |
-| Judge failure mode | Timeout/error = deny | Fail closed, always |
+| Human approval | Unknown actions block until human decides in TUI | Deterministic, no AI in the loop |

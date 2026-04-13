@@ -1,6 +1,6 @@
 # Contributing Templates
 
-Templates pre-approve network actions so agents can function without per-request judge evaluation. This directory contains community-contributed templates.
+Templates pre-approve network actions so agents can function without per-request human approval. This directory contains community-contributed templates.
 
 ## Structure
 

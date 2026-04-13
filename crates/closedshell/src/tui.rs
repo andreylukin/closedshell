@@ -51,28 +51,11 @@ enum AuditPayload {
         total_decisions: u64,
         denied: u64,
     },
-    Judge {
+    HumanApproval {
         action: String,
-        decision: String,
+        verdict: String,
         risk_tier: String,
-        latency_ms: u64,
-        implicit: bool,
-    },
-    Plan {
-        plan_id: String,
-        description: String,
-        auto_approved: u32,
-        pending_human: u32,
-    },
-    Context {
-        old_task: Option<String>,
-        new_task: String,
-    },
-    FileIo {
-        action: String,
-        result: String,
-        decided_by: String,
-        bytes: Option<u64>,
+        wait_ms: u64,
     },
 }
 
@@ -115,10 +98,9 @@ struct App {
     // Data
     rules: Vec<RuleEntry>,
     activity: Vec<ActivityEntry>,
-    judge_entries: Vec<JudgeEntry>,
     pending_approvals: Vec<PendingApprovalEntry>,
 
-    // UI state: 0=Live, 1=Rules, 2=Approvals, 3=History
+    // UI state: 0=Live, 1=Rules, 2=Approvals
     active_tab: usize,
     scroll_offset: usize,
     selected_rule: usize,
@@ -152,31 +134,17 @@ enum ActivityKind {
         method: String,
         host: String,
     },
-    Context {
-        new_task: String,
-    },
-    Plan {
-        plan_id: String,
-        description: String,
-        auto_approved: u32,
-        pending_human: u32,
+    HumanApproval {
+        action: String,
+        verdict: String,
+        risk_tier: String,
+        wait_ms: u64,
     },
     SessionEnd {
         duration_s: u64,
         total_decisions: u64,
         denied: u64,
     },
-}
-
-#[derive(Debug)]
-struct JudgeEntry {
-    ts: String,
-    action: String,
-    decision: String,
-    risk_tier: String,
-    latency_ms: u64,
-    implicit: bool,
-    reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -201,7 +169,6 @@ impl App {
             log_path,
             rules: Vec::new(),
             activity: Vec::new(),
-            judge_entries: Vec::new(),
             pending_approvals: Vec::new(),
             active_tab: 0,
             scroll_offset: 0,
@@ -294,13 +261,6 @@ impl App {
                 latency_ms,
                 request,
             } => {
-                if decided_by == "judge"
-                    && let Some(last) = self.judge_entries.last_mut()
-                    && last.action == action
-                    && last.reason.is_none()
-                {
-                    last.reason = reason.clone();
-                }
                 self.activity.push(ActivityEntry {
                     ts,
                     kind: ActivityKind::Decision {
@@ -314,61 +274,19 @@ impl App {
                     },
                 });
             }
-            AuditPayload::Judge {
+            AuditPayload::HumanApproval {
                 action,
-                decision,
+                verdict,
                 risk_tier,
-                latency_ms,
-                implicit,
-            } => {
-                self.judge_entries.push(JudgeEntry {
-                    ts,
-                    action,
-                    decision,
-                    risk_tier,
-                    latency_ms,
-                    implicit,
-                    reason: None,
-                });
-            }
-            AuditPayload::Context { new_task, .. } => {
-                self.activity.push(ActivityEntry {
-                    ts,
-                    kind: ActivityKind::Context { new_task },
-                });
-            }
-            AuditPayload::Plan {
-                plan_id,
-                description,
-                auto_approved,
-                pending_human,
+                wait_ms,
             } => {
                 self.activity.push(ActivityEntry {
                     ts,
-                    kind: ActivityKind::Plan {
-                        plan_id,
-                        description,
-                        auto_approved,
-                        pending_human,
-                    },
-                });
-            }
-            AuditPayload::FileIo {
-                action,
-                result,
-                decided_by,
-                ..
-            } => {
-                self.activity.push(ActivityEntry {
-                    ts,
-                    kind: ActivityKind::Decision {
+                    kind: ActivityKind::HumanApproval {
                         action,
-                        result,
-                        decided_by,
-                        reason: None,
-                        latency_ms: 0,
-                        method: "FILE".into(),
-                        host: "local".into(),
+                        verdict,
+                        risk_tier,
+                        wait_ms,
                     },
                 });
             }
@@ -419,7 +337,7 @@ impl App {
     }
 
     fn tab_names(&self) -> Vec<&str> {
-        vec!["Live", "Rules", "Approvals", "Judge"]
+        vec!["Live", "Rules", "Approvals"]
     }
 
     fn poll_approvals(&mut self) {
@@ -524,8 +442,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .filter(|a| matches!(a.kind, ActivityKind::Decision { .. }))
         .count();
-    let judge_calls = app.judge_entries.len();
-
     let short_id = if app.session_id.len() > 8 {
         &app.session_id[..8]
     } else {
@@ -540,7 +456,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw(format!(" {}  ", mode)),
         status,
-        Span::raw(format!("  decisions={} judge={}", decisions, judge_calls)),
+        Span::raw(format!("  decisions={}", decisions)),
         if !app.pending_approvals.is_empty() {
             Span::styled(
                 format!("  pending={}", app.pending_approvals.len()),
@@ -578,7 +494,6 @@ fn draw_right_panel(f: &mut Frame, app: &App, area: Rect) {
         0 => draw_activity(f, app, chunks[1]),
         1 => draw_rules_tab(f, app, chunks[1]),
         2 => draw_approvals(f, app, chunks[1]),
-        3 => draw_judge(f, app, chunks[1]),
         _ => {}
     }
 }
@@ -614,12 +529,9 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
                         || host.to_lowercase().contains(&q)
                         || reason.as_deref().unwrap_or("").to_lowercase().contains(&q)
                 }
-                ActivityKind::Context { new_task } => new_task.to_lowercase().contains(&q),
-                ActivityKind::Plan {
-                    plan_id,
-                    description,
-                    ..
-                } => plan_id.to_lowercase().contains(&q) || description.to_lowercase().contains(&q),
+                ActivityKind::HumanApproval {
+                    action, verdict, ..
+                } => action.to_lowercase().contains(&q) || verdict.to_lowercase().contains(&q),
                 ActivityKind::SessionEnd { .. } => false,
             })
             .collect()
@@ -677,34 +589,42 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
                         ),
                     ]))
                 }
-                ActivityKind::Context { new_task } => ListItem::new(Line::from(vec![
-                    ts,
-                    Span::styled(
-                        "TASK ",
-                        Style::default()
-                            .fg(Color::Blue)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(truncate(new_task, 80)),
-                ])),
-                ActivityKind::Plan {
-                    plan_id,
-                    auto_approved,
-                    pending_human,
-                    ..
-                } => ListItem::new(Line::from(vec![
-                    ts,
-                    Span::styled(
-                        "PLAN ",
-                        Style::default()
-                            .fg(Color::Magenta)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(format!(
-                        "{} approved={} pending={}",
-                        plan_id, auto_approved, pending_human
-                    )),
-                ])),
+                ActivityKind::HumanApproval {
+                    action,
+                    verdict,
+                    risk_tier,
+                    wait_ms,
+                } => {
+                    let (verdict_str, color) = if verdict == "approved" {
+                        ("APPROVED", Color::Green)
+                    } else {
+                        ("DENIED", Color::Red)
+                    };
+                    let risk_color = match risk_tier.as_str() {
+                        "safe" => Color::Green,
+                        "moderate" => Color::Yellow,
+                        "dangerous" => Color::Red,
+                        _ => Color::White,
+                    };
+                    ListItem::new(Line::from(vec![
+                        ts,
+                        Span::styled(
+                            format!("{:8}", verdict_str),
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(" "),
+                        Span::raw(truncate(action, 40)),
+                        Span::raw("  "),
+                        Span::styled(
+                            format!("risk={}", risk_tier),
+                            Style::default().fg(risk_color),
+                        ),
+                        Span::styled(
+                            format!("  {}ms", wait_ms),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]))
+                }
                 ActivityKind::SessionEnd {
                     duration_s,
                     total_decisions,
@@ -745,87 +665,6 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
         ]));
         f.render_widget(search_line, sa);
     }
-}
-
-fn draw_judge(f: &mut Frame, app: &App, area: Rect) {
-    let visible_height = area.height.saturating_sub(2) as usize;
-    let lines_per_entry = 3;
-    let total_lines = app.judge_entries.len() * lines_per_entry;
-    let skip_entries = if total_lines > visible_height + app.scroll_offset * lines_per_entry {
-        (total_lines - visible_height - app.scroll_offset * lines_per_entry) / lines_per_entry
-    } else {
-        0
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
-    for entry in app.judge_entries.iter().skip(skip_entries) {
-        let (decision_str, color) = match entry.decision.as_str() {
-            "approve" => ("APPROVE", Color::Green),
-            "deny" => ("DENY", Color::Red),
-            "escalate_human" => ("ESCALATE", Color::Yellow),
-            _ => (&*entry.decision, Color::White),
-        };
-
-        let risk_color = match entry.risk_tier.as_str() {
-            "safe" => Color::Green,
-            "moderate" => Color::Yellow,
-            "dangerous" => Color::Red,
-            _ => Color::White,
-        };
-
-        let implicit_tag = if entry.implicit { " implicit" } else { "" };
-
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", entry.ts),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                format!("{:9}", decision_str),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                truncate(&entry.action, 50),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-        ]));
-
-        lines.push(Line::from(vec![
-            Span::raw("           "),
-            Span::styled(
-                format!("risk={}", entry.risk_tier),
-                Style::default().fg(risk_color),
-            ),
-            Span::styled(
-                format!("  {}ms{}", entry.latency_ms, implicit_tag),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-
-        if let Some(ref reason) = entry.reason {
-            lines.push(Line::from(vec![
-                Span::raw("           "),
-                Span::styled(
-                    truncate(reason, 70),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ]));
-        } else {
-            lines.push(Line::from(""));
-        }
-    }
-
-    let title = format!(" Judge ({}) ", app.judge_entries.len());
-    let paragraph = Paragraph::new(lines).block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta)),
-    );
-    f.render_widget(paragraph, area);
 }
 
 fn draw_rules_tab(f: &mut Frame, app: &App, area: Rect) {
@@ -1212,10 +1051,6 @@ pub fn run(session_id: &str) -> Result<()> {
                     app.active_tab = 2;
                     app.scroll_offset = 0;
                 }
-                KeyCode::Char('4') if app.active_tab != 3 => {
-                    app.active_tab = 3;
-                    app.scroll_offset = 0;
-                }
 
                 // Scrolling / selection
                 KeyCode::Up | KeyCode::Char('k') => match app.active_tab {
@@ -1387,7 +1222,7 @@ mod tests {
     fn parse_decision_deny() {
         let mut app = App::new("test01".into());
         let event: AuditEvent = serde_json::from_str(&make_log_line(
-            r#""event":"decision","action":"aws:s3:DeleteBucket","result":"deny: destructive","decided_by":"judge","reason":"destructive action","latency_ms":892,"request":{"method":"POST","host":"s3.amazonaws.com","path":"/"}"#,
+            r#""event":"decision","action":"aws:s3:DeleteBucket","result":"deny: forbidden","decided_by":"tree","reason":"forbidden by rule","latency_ms":0,"request":{"method":"POST","host":"s3.amazonaws.com","path":"/"}"#,
         ))
         .unwrap();
         app.ingest_event(event);
@@ -1402,43 +1237,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_judge_event() {
+    fn parse_human_approval() {
         let mut app = App::new("test01".into());
         let event: AuditEvent = serde_json::from_str(&make_log_line(
-            r#""event":"judge","action":"aws:s3:GetObject","decision":"approve","risk_tier":"safe","latency_ms":234,"implicit":true"#,
+            r#""event":"human_approval","action":"aws:s3:GetObject","verdict":"approved","risk_tier":"safe","wait_ms":2340"#,
         ))
         .unwrap();
         app.ingest_event(event);
 
-        assert_eq!(app.judge_entries.len(), 1);
-        assert_eq!(app.judge_entries[0].decision, "approve");
-        assert_eq!(app.judge_entries[0].risk_tier, "safe");
-        assert!(app.judge_entries[0].implicit);
-        assert!(app.judge_entries[0].reason.is_none());
-    }
-
-    #[test]
-    fn judge_reasoning_attached_from_decision() {
-        let mut app = App::new("test01".into());
-
-        // First: judge event
-        let judge: AuditEvent = serde_json::from_str(&make_log_line(
-            r#""event":"judge","action":"aws:s3:PutObject","decision":"approve","risk_tier":"moderate","latency_ms":500,"implicit":true"#,
-        ))
-        .unwrap();
-        app.ingest_event(judge);
-
-        // Then: decision event with reason, decided_by=judge
-        let decision: AuditEvent = serde_json::from_str(&make_log_line(
-            r#""event":"decision","action":"aws:s3:PutObject","result":"allow","decided_by":"judge","reason":"within task scope","latency_ms":501,"request":{"method":"PUT","host":"s3.amazonaws.com","path":"/bucket/key"}"#,
-        ))
-        .unwrap();
-        app.ingest_event(decision);
-
-        assert_eq!(
-            app.judge_entries[0].reason.as_deref(),
-            Some("within task scope")
-        );
+        assert_eq!(app.activity.len(), 1);
+        match &app.activity[0].kind {
+            ActivityKind::HumanApproval {
+                action,
+                verdict,
+                risk_tier,
+                wait_ms,
+            } => {
+                assert_eq!(action, "aws:s3:GetObject");
+                assert_eq!(verdict, "approved");
+                assert_eq!(risk_tier, "safe");
+                assert_eq!(*wait_ms, 2340);
+            }
+            other => panic!("expected HumanApproval, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1463,49 +1284,6 @@ mod tests {
                 assert_eq!(*denied, 3);
             }
             other => panic!("expected SessionEnd, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn parse_context_change() {
-        let mut app = App::new("test01".into());
-        let event: AuditEvent = serde_json::from_str(&make_log_line(
-            r#""event":"context","old_task":"old stuff","new_task":"search for chocolate shops in Boston""#,
-        ))
-        .unwrap();
-        app.ingest_event(event);
-
-        assert_eq!(app.activity.len(), 1);
-        match &app.activity[0].kind {
-            ActivityKind::Context { new_task } => {
-                assert_eq!(new_task, "search for chocolate shops in Boston");
-            }
-            other => panic!("expected Context, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn parse_plan() {
-        let mut app = App::new("test01".into());
-        let event: AuditEvent = serde_json::from_str(&make_log_line(
-            r#""event":"plan","plan_id":"plan-001","description":"deploy to staging","auto_approved":5,"pending_human":2"#,
-        ))
-        .unwrap();
-        app.ingest_event(event);
-
-        assert_eq!(app.activity.len(), 1);
-        match &app.activity[0].kind {
-            ActivityKind::Plan {
-                plan_id,
-                auto_approved,
-                pending_human,
-                ..
-            } => {
-                assert_eq!(plan_id, "plan-001");
-                assert_eq!(*auto_approved, 5);
-                assert_eq!(*pending_human, 2);
-            }
-            other => panic!("expected Plan, got {:?}", other),
         }
     }
 
@@ -1638,29 +1416,6 @@ mod tests {
     }
 
     #[test]
-    fn render_judge_tab() {
-        let mut app = App::new("render03".into());
-        app.active_tab = 3; // Switch to Judge tab
-
-        let event: AuditEvent = serde_json::from_str(&make_log_line(
-            r#""event":"judge","action":"aws:s3:DeleteBucket","decision":"deny","risk_tier":"dangerous","latency_ms":892,"implicit":true"#,
-        ))
-        .unwrap();
-        app.ingest_event(event);
-
-        let backend = TestBackend::new(120, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| draw(f, &app)).unwrap();
-
-        let buf = terminal.backend().buffer().clone();
-        let content = buffer_text(&buf);
-        assert!(content.contains("Judge (1)"));
-        assert!(content.contains("DENY"));
-        assert!(content.contains("dangerous"));
-        assert!(content.contains("DeleteBucket"));
-    }
-
-    #[test]
     fn render_session_ended() {
         let mut app = App::new("render04".into());
 
@@ -1690,9 +1445,6 @@ mod tests {
 
         app.active_tab = (app.active_tab + 1) % app.tab_names().len();
         assert_eq!(app.active_tab, 2);
-
-        app.active_tab = (app.active_tab + 1) % app.tab_names().len();
-        assert_eq!(app.active_tab, 3);
 
         app.active_tab = (app.active_tab + 1) % app.tab_names().len();
         assert_eq!(app.active_tab, 0); // wraps back
@@ -1734,7 +1486,7 @@ mod tests {
     use closedshell_lib::ipc::{IpcHandler, IpcRequest, IpcResponse, IpcServer};
     use closedshell_lib::permission::{Effect, PermissionTree, Rule};
 
-    /// Minimal IPC handler backed by a PermissionTree — no judge needed.
+    /// Minimal IPC handler backed by a PermissionTree for tests.
     struct TestIpcHandler {
         tree: Arc<PermissionTree>,
     }
@@ -1889,15 +1641,15 @@ mod tests {
         let text = h.poll_and_render();
         assert!(text.contains("Rules (1)"));
 
-        // Judge approves a new action → rule added
-        h.add_rule(Effect::Permit, "aws:s3:GetObject", "judge");
+        // Human approves a new action → rule added
+        h.add_rule(Effect::Permit, "aws:s3:GetObject", "human");
         let text = h.poll_and_render();
         assert!(
             text.contains("Rules (2)"),
-            "rule not visible after judge approval"
+            "rule not visible after human approval"
         );
         assert!(text.contains("aws:s3:GetObject"));
-        assert!(text.contains("judge"));
+        assert!(text.contains("human"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1946,10 +1698,10 @@ mod tests {
 
         let text = h.write_event_and_render(AuditPayload::Decision {
             action: "aws:s3:DeleteBucket".into(),
-            result: "deny: destructive action outside task scope".into(),
-            decided_by: "judge".into(),
-            reason: Some("destructive action outside task scope".into()),
-            latency_ms: 892,
+            result: "deny: forbidden by rule".into(),
+            decided_by: "tree".into(),
+            reason: Some("forbidden by rule".into()),
+            latency_ms: 0,
             request: AuditRequestMeta {
                 method: "DELETE".into(),
                 host: "s3.amazonaws.com".into(),
@@ -1959,125 +1711,6 @@ mod tests {
 
         assert!(text.contains("DENY"));
         assert!(text.contains("DeleteBucket"));
-        assert!(text.contains("892ms"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn dual_judge_reasoning_visible() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = DualHarness::new(dir.path()).await;
-
-        // Judge event first
-        h.audit
-            .log(AuditPayload::Judge {
-                action: "aws:s3:PutObject".into(),
-                decision: "approve".into(),
-                risk_tier: "moderate".into(),
-                latency_ms: 340,
-                implicit: false,
-            })
-            .unwrap();
-
-        // Then the decision with reasoning
-        h.audit
-            .log(AuditPayload::Decision {
-                action: "aws:s3:PutObject".into(),
-                result: "allow".into(),
-                decided_by: "judge".into(),
-                reason: Some("write operation within stated task scope".into()),
-                latency_ms: 341,
-                request: AuditRequestMeta {
-                    method: "PUT".into(),
-                    host: "s3.amazonaws.com".into(),
-                    path: "/bucket/key".into(),
-                },
-            })
-            .unwrap();
-
-        // Switch to Judge tab and render
-        h.app.active_tab = 3;
-        let text = h.poll_and_render();
-
-        assert!(text.contains("Judge (1)"));
-        assert!(text.contains("APPROVE"));
-        assert!(text.contains("moderate"));
-        assert!(text.contains("340ms"));
-        assert!(text.contains("PutObject"));
-        assert!(
-            text.contains("write operation within stated task scope"),
-            "reasoning not visible in judge tab: {}",
-            text
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn dual_judge_deny_and_escalate() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = DualHarness::new(dir.path()).await;
-
-        // Judge deny → generates a Decision
-        h.audit
-            .log(AuditPayload::Judge {
-                action: "aws:iam:CreateRole".into(),
-                decision: "deny".into(),
-                risk_tier: "dangerous".into(),
-                latency_ms: 200,
-                implicit: false,
-            })
-            .unwrap();
-        h.audit
-            .log(AuditPayload::Decision {
-                action: "aws:iam:CreateRole".into(),
-                result: "deny: dangerous action".into(),
-                decided_by: "judge".into(),
-                reason: Some("dangerous action".into()),
-                latency_ms: 201,
-                request: AuditRequestMeta {
-                    method: "POST".into(),
-                    host: "iam.amazonaws.com".into(),
-                    path: "/".into(),
-                },
-            })
-            .unwrap();
-
-        // Judge escalate → generates a Decision
-        h.audit
-            .log(AuditPayload::Judge {
-                action: "aws:s3:DeleteObject".into(),
-                decision: "escalate_human".into(),
-                risk_tier: "dangerous".into(),
-                latency_ms: 180,
-                implicit: true,
-            })
-            .unwrap();
-        h.audit
-            .log(AuditPayload::Decision {
-                action: "aws:s3:DeleteObject".into(),
-                result: "deny: escalated to human".into(),
-                decided_by: "judge".into(),
-                reason: Some("escalated to human".into()),
-                latency_ms: 181,
-                request: AuditRequestMeta {
-                    method: "DELETE".into(),
-                    host: "s3.amazonaws.com".into(),
-                    path: "/bucket/key".into(),
-                },
-            })
-            .unwrap();
-
-        // Check Live tab shows both denials
-        let text = h.poll_and_render();
-        assert!(
-            text.contains("Activity (2)"),
-            "should show 2 decisions: {}",
-            text
-        );
-        assert!(text.contains("DENY"));
-        assert!(text.contains("CreateRole"));
-        assert!(text.contains("DeleteObject"));
-
-        // Verify judge entries still tracked internally
-        assert_eq!(h.app.judge_entries.len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2127,23 +1760,22 @@ mod tests {
         assert!(text.contains("Activity (1)"));
         assert!(text.contains("ALLOW"));
 
-        // 3. Unknown action → judge approves → new rule appears
+        // 3. Unknown action → human approves → new rule appears
         h.audit
-            .log(AuditPayload::Judge {
+            .log(AuditPayload::HumanApproval {
                 action: "net:GET:exa.ai/search".into(),
-                decision: "approve".into(),
+                verdict: "approved".into(),
                 risk_tier: "safe".into(),
-                latency_ms: 450,
-                implicit: true,
+                wait_ms: 2500,
             })
             .unwrap();
         h.audit
             .log(AuditPayload::Decision {
                 action: "net:GET:exa.ai/search".into(),
                 result: "allow".into(),
-                decided_by: "judge".into(),
-                reason: Some("search is within task scope".into()),
-                latency_ms: 451,
+                decided_by: "human".into(),
+                reason: None,
+                latency_ms: 2501,
                 request: AuditRequestMeta {
                     method: "GET".into(),
                     host: "exa.ai".into(),
@@ -2151,34 +1783,24 @@ mod tests {
                 },
             })
             .unwrap();
-        h.add_rule(Effect::Permit, "net:GET:exa.ai/*", "judge");
+        h.add_rule(Effect::Permit, "net:GET:exa.ai/*", "human");
 
         let text = h.poll_and_render();
         assert!(
             text.contains("exa.ai"),
-            "judge-approved action should appear"
+            "human-approved action should appear"
         );
-        assert!(text.contains("exa.ai"));
-        assert!(text.contains("Activity (2)"));
-        assert!(text.contains("judge=1"), "judge counter should be 1");
+        assert!(text.contains("Activity (3)")); // 1 decision + 1 human_approval + 1 decision
 
-        // 4. Dangerous action → judge denies
-        h.audit
-            .log(AuditPayload::Judge {
-                action: "aws:s3:DeleteBucket".into(),
-                decision: "deny".into(),
-                risk_tier: "dangerous".into(),
-                latency_ms: 300,
-                implicit: false,
-            })
-            .unwrap();
+        // 4. Dangerous action → denied by tree (forbid rule)
+        h.add_rule(Effect::Forbid, "aws:s3:DeleteBucket", "template:safety");
         h.audit
             .log(AuditPayload::Decision {
                 action: "aws:s3:DeleteBucket".into(),
-                result: "deny: destructive action".into(),
-                decided_by: "judge".into(),
-                reason: Some("destructive action outside scope".into()),
-                latency_ms: 301,
+                result: "deny: forbidden by rule".into(),
+                decided_by: "tree".into(),
+                reason: Some("forbidden by rule".into()),
+                latency_ms: 0,
                 request: AuditRequestMeta {
                     method: "DELETE".into(),
                     host: "s3.amazonaws.com".into(),
@@ -2188,18 +1810,8 @@ mod tests {
             .unwrap();
 
         let text = h.poll_and_render();
-        assert!(text.contains("Activity (3)"));
+        assert!(text.contains("Activity (4)"));
         assert!(text.contains("DENY"));
-        assert!(text.contains("judge=2"));
-
-        // Verify Judge tab shows both judge entries with reasoning
-        h.app.active_tab = 3;
-        let text = h.poll_and_render();
-        assert!(text.contains("Judge (2)"));
-        assert!(text.contains("APPROVE"));
-        assert!(text.contains("DENY"));
-        assert!(text.contains("search is within task scope"));
-        assert!(text.contains("destructive action outside scope"));
 
         // 5. Session ends
         h.app.active_tab = 0;
@@ -2237,8 +1849,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut h = DualHarness::new(dir.path()).await;
 
-        h.add_rule(Effect::Permit, "aws:s3:GetObject", "judge");
-        h.add_rule(Effect::Permit, "aws:s3:PutObject", "judge");
+        h.add_rule(Effect::Permit, "aws:s3:GetObject", "human");
+        h.add_rule(Effect::Permit, "aws:s3:PutObject", "human");
         h.app.active_tab = 1; // Rules tab
         let text = h.poll_and_render();
         assert!(text.contains("Rules (2)"));
@@ -2267,35 +1879,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn dual_context_change_visible() {
+    async fn dual_human_approval_visible() {
         let dir = tempfile::tempdir().unwrap();
         let mut h = DualHarness::new(dir.path()).await;
 
-        let text = h.write_event_and_render(AuditPayload::Context {
-            old_task: None,
-            new_task: "search for Boston chocolate shops".into(),
+        let text = h.write_event_and_render(AuditPayload::HumanApproval {
+            action: "aws:s3:PutObject".into(),
+            verdict: "approved".into(),
+            risk_tier: "moderate".into(),
+            wait_ms: 3400,
         });
 
-        assert!(text.contains("TASK"));
-        assert!(text.contains("Boston chocolate"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn dual_plan_visible() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = DualHarness::new(dir.path()).await;
-
-        let text = h.write_event_and_render(AuditPayload::Plan {
-            plan_id: "plan-007".into(),
-            description: "deploy staging infrastructure".into(),
-            auto_approved: 5,
-            pending_human: 2,
-        });
-
-        assert!(text.contains("PLAN"));
-        assert!(text.contains("plan-007"));
-        assert!(text.contains("approved=5"));
-        assert!(text.contains("pending=2"));
+        assert!(text.contains("APPROVED"));
+        assert!(text.contains("PutObject"));
+        assert!(text.contains("moderate"));
     }
 
     #[tokio::test(flavor = "multi_thread")]

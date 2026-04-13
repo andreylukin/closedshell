@@ -5,13 +5,12 @@ use closedshell_lib::approval::ApprovalQueue;
 use closedshell_lib::audit::{AuditLog, AuditPayload};
 use closedshell_lib::config::{self, CliFlags};
 use closedshell_lib::db::{RuleRow, SessionDb, SessionRow};
-use closedshell_lib::ipc::{
-    IpcHandler, IpcServer, ProductionIpcHandler, SessionState, YoloIpcHandler,
-};
-use closedshell_lib::judge::JudgeClient;
+use closedshell_lib::ipc::{EnforcingIpcHandler, IpcHandler, IpcServer, SessionState};
 use closedshell_lib::permission::PermissionTree;
 use closedshell_lib::pf;
-use closedshell_lib::proxy::{DecisionMaker, JudgeDecider, MitmProxy, PatternDecider, YoloDecider};
+use closedshell_lib::proxy::{
+    DecisionMaker, EnforcingDecider, MitmProxy, PatternDecider, YoloDecider,
+};
 use closedshell_lib::sandbox;
 use closedshell_lib::template;
 use closedshell_lib::tls::SessionCA;
@@ -428,40 +427,33 @@ async fn main() -> anyhow::Result<()> {
     // Build approval queue (used in enforcing mode)
     let approval_queue = Arc::new(ApprovalQueue::new());
 
-    // Build decider + IPC handler: yolo vs enforcing
-    let (decider, ipc_handler): (Arc<dyn DecisionMaker>, Arc<dyn IpcHandler>) =
+    // Build decider + optional IPC handler: yolo vs enforcing
+    let (decider, ipc_handler): (Arc<dyn DecisionMaker>, Option<Arc<dyn IpcHandler>>) =
         if config.sandbox.yolo {
             if !cli.allow.is_empty() {
                 (
                     Arc::new(PatternDecider {
                         allow_patterns: cli.allow.clone(),
-                    }),
-                    Arc::new(YoloIpcHandler) as Arc<dyn IpcHandler>,
+                    }) as Arc<dyn DecisionMaker>,
+                    None,
                 )
             } else {
-                (
-                    Arc::new(YoloDecider) as Arc<dyn DecisionMaker>,
-                    Arc::new(YoloIpcHandler) as Arc<dyn IpcHandler>,
-                )
+                (Arc::new(YoloDecider) as Arc<dyn DecisionMaker>, None)
             }
         } else {
-            let judge = Arc::new(JudgeClient::new(config.judge.clone())?);
             (
-                Arc::new(JudgeDecider {
+                Arc::new(EnforcingDecider {
                     tree: tree.clone(),
-                    judge: judge.clone(),
                     state: state.clone(),
                     audit: audit.clone(),
-                    implicit_ask: config.sandbox.implicit_ask,
-                    approval_queue: Some(approval_queue.clone()),
+                    approval_queue: approval_queue.clone(),
                 }) as Arc<dyn DecisionMaker>,
-                Arc::new(ProductionIpcHandler {
+                Some(Arc::new(EnforcingIpcHandler {
                     tree: tree.clone(),
-                    judge,
                     state: state.clone(),
                     audit: audit.clone(),
-                    approval_queue: Some(approval_queue.clone()),
-                }) as Arc<dyn IpcHandler>,
+                    approval_queue: approval_queue.clone(),
+                }) as Arc<dyn IpcHandler>),
             )
         };
 
@@ -535,9 +527,13 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // 6c. Start IPC server
-    let ipc_server = IpcServer::new(&ipc_socket_path, ipc_handler);
-    let ipc_handle = ipc_server.start()?;
+    // 6c. Start IPC server (enforcing mode only — TUI uses it for approvals)
+    let ipc_handle = if let Some(handler) = ipc_handler {
+        let server = IpcServer::new(&ipc_socket_path, handler);
+        Some(server.start()?)
+    } else {
+        None
+    };
 
     // 7. Print MOTD
     if config.sandbox.motd {
@@ -720,7 +716,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     proxy_handle.abort();
-    ipc_handle.abort();
+    if let Some(h) = ipc_handle {
+        h.abort();
+    }
 
     // Remove tmpdir (CA persists in ~/.closedshell/)
     let _ = std::fs::remove_dir_all(&tmpdir);

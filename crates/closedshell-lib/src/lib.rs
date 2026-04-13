@@ -1,14 +1,13 @@
-pub mod agent_instructions;
 pub mod approval;
 pub mod audit;
 pub mod config;
 pub mod db;
 pub mod ipc;
-pub mod judge;
 pub mod parser;
 pub mod permission;
 pub mod pf;
 pub mod proxy;
+pub mod risk;
 pub mod sandbox;
 pub mod template;
 pub mod tls;

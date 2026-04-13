@@ -1,8 +1,8 @@
 //! Human approval queue.
 //!
-//! When the judge returns `escalate_human`, the proxy parks the request here
-//! and waits on a oneshot channel. The TUI (or webhook) resolves pending
-//! approvals, unblocking the proxy.
+//! When no rule matches an action, the proxy parks the request here
+//! and waits on a oneshot channel. The TUI resolves pending approvals,
+//! unblocking the proxy.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
