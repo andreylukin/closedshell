@@ -241,6 +241,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn test_log_dir_resolves_symlinks() {
         // /var → /private/var on macOS; both should produce the same log dir
         let via_var = log_dir_for_cwd(std::path::Path::new("/var"));
