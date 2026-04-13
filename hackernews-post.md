@@ -1,27 +1,23 @@
 # HN Post
 
-**Title:** Show HN: ClosedShell – A MITM proxy that parses your AI agent's API calls and asks before allowing them
+**Title:** Show HN: ClosedShell - single Rust binary that intercepts your AI agent's API calls at L7 (macOS)
 
 **URL:** https://github.com/andreylukin/closedshell
 
-**Text (post body):**
-
-Most agent sandboxes focus on the filesystem. ClosedShell focuses on the network. It intercepts every outbound HTTPS request, terminates TLS, and parses the request into a semantic action. An S3 delete becomes `aws:s3:DeleteBucket`. A GitHub push becomes `gh:repos/org/repo:POST`. Built-in parsers for AWS (reads SigV4 headers), GCP, Azure, K8s, and GitHub. Unknown hosts fall back to `net:METHOD:host/path`.
-
-You write permit/forbid policies using a Cedar-inspired format and stack templates per provider. Forbid always beats permit, default is deny, and anything not covered blocks in a live terminal UI until you approve or reject it. The proxy holds the connection while you decide.
-
-If you don't know what your agent calls yet, run in observe mode (log everything, block nothing) and auto-generate a policy from the traffic.
-
-One Rust binary, no root, no kernel extensions. macOS only (Seatbelt + MITM proxy). MIT licensed.
+**Text field:** leave blank (URL post, body goes in first comment)
 
 ---
 
-**Intro comment (post as first reply to your own submission):**
+**First comment (post immediately after submitting):**
 
-I built this because file-level sandboxing felt like half the picture. My agent can't overwrite /etc/passwd, great. But it still has my AWS keys, my GitHub token, and my kubectl context. One bad tool call and it's making API calls I never intended, with my credentials, against production infrastructure.
+I've been using Claude Code to do Terraform and set up a new AWS region from scratch. I want to move fast and let the agent do its thing, but I also want to define the edges. Reads are fine. Writes need a second look. Deletes should never happen without me saying so.
 
-Existing sandboxes mostly stop at the filesystem or block entire hosts. I wanted something that understands what the agent is actually doing at the API level. When my agent calls S3, I want to know if it's listing buckets or deleting them, and I want different policies for each.
+Most agent sandboxes solve this at the filesystem or syscall level. That's useful, but it doesn't help when the agent is making HTTP calls to cloud APIs using your credentials. ClosedShell sits at the network layer instead. It intercepts every outbound HTTPS request, terminates TLS, and parses the actual API call. An S3 request becomes `aws:s3:DeleteBucket` or `aws:s3:ListBuckets`, not just "a POST to s3.amazonaws.com". Built-in parsers for AWS (reads SigV4 headers), GCP, Azure, K8s, and GitHub.
 
-The proxy parses requests into structured actions using provider-specific logic (AWS SigV4 signatures, GCP REST paths, etc.), then evaluates them against a permission tree. Templates ship for Anthropic, OpenAI, GitHub, and Exa so you can get started without approving every single request manually.
+You pre-approve what you know is fine using stackable templates (ship with Anthropic, OpenAI, GitHub, Exa built-in). Everything else blocks in a live TUI and the proxy holds the connection until you decide. Forbid always beats permit, default is deny.
 
-Happy to answer any questions about the design or take feedback on the policy format.
+If you don't know what your agent calls yet, run in observe mode first, then auto-generate a policy from the traffic.
+
+Single Rust binary, no root, no kernel extensions, just Seatbelt + a local MITM proxy. macOS only for now. MIT licensed, Linux contributions welcome.
+
+Happy to answer questions about the proxy design or the policy format.
