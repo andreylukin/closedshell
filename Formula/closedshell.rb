@@ -28,7 +28,7 @@ class Closedshell < Formula
 
     templates_dst = Pathname.new(Dir.home)/".closedshell"/"templates"
     templates_dst.mkpath
-    FileUtils.cp_r(Dir["#{templates_src}/*"], templates_dst)
+    FileUtils.cp_r(Dir["#{templates_src}/*"], templates_dst, remove_destination: true)
   end
 
   def caveats
