@@ -48,7 +48,7 @@ docs/                # architecture spec and design docs
 cs --yolo -- claude
 
 # Enforcing mode — unknown actions block for human approval in the TUI
-cs --template anthropic/full --task "describe what the agent should do" -- claude
+cs --template anthropic/full -- claude
 ```
 
 **Templates** pre-approve infra the agent needs to function. Without `--template anthropic/full`, Claude Code's own API calls require manual approval in the TUI.
@@ -72,8 +72,6 @@ Available built-in templates:
 - `github/full`, `github/readonly` — GitHub API and git operations
 - `exa/full`, `exa/readonly`, `exa/search-only` — Exa search API
 - `openai/full` — OpenAI API endpoints
-
-**`--task`** sets the session task. Displayed in the MOTD and audit log.
 
 ## Modes
 

@@ -36,13 +36,13 @@ Some tests require `ANTHROPIC_KEY` to be set and are skipped in CI.
 
 ## Templates — the easiest way to contribute
 
-Permission templates are YAML files that pre-approve endpoints for specific providers. They don't require any Rust knowledge and are the fastest way to contribute. Templates in `templates/` are compiled into the binary at build time.
+Permission templates are `.csp` files (Cedar-inspired ClosedShell Policy format) that pre-approve endpoints for specific providers. They don't require any Rust knowledge and are the fastest way to contribute. Templates in `templates/` are compiled into the binary at build time.
 
 **Adding a template for a new provider:**
 
 ```bash
 cs template init myservice              # scaffold
-$EDITOR ~/.closedshell/templates/myservice/full.yaml
+$EDITOR ~/.closedshell/templates/myservice/full.csp
 cs template validate myservice/full     # check for errors
 cs template check myservice/full "net:GET:api.myservice.com/v1/data"  # test actions
 ```

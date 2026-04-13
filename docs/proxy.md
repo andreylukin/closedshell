@@ -11,7 +11,7 @@ Transparent MITM proxy. Session-scoped CA cert injected into sandbox at creation
 - Check action against permission tree (forbid → permit → block for human approval). See [permission-tree.md § Evaluation Algorithm](permission-tree.md#evaluation-algorithm).
 - Forward approved requests with credentials as-is (passthrough)
 - Log all decisions to audit log (see [architecture.md § Audit Log](architecture.md#audit-log))
-- Support WebSocket/streaming (see [§ Streaming and WebSocket](#streaming-and-websocket))
+- Support HTTP streaming (chunked, SSE) — see [§ Streaming and WebSocket](#streaming-and-websocket)
 
 ---
 
@@ -19,11 +19,11 @@ Transparent MITM proxy. Session-scoped CA cert injected into sandbox at creation
 
 | Provider | Wire Format | Canonical Action |
 |----------|-------------|------------------|
-| AWS | `POST / Action=TerminateInstances` | `aws[profile=default]:ec2:TerminateInstances` |
-| GCP | `DELETE .../instances/{id}` | `gcp[project=myproj]:compute.instances.delete` |
-| Azure | `DELETE .../Microsoft.Compute/...` | `az[sub=abc123]:Microsoft.Compute/delete` |
-| GitHub | `POST /repos/x/pulls` | `gh[token=GITHUB_TOKEN]:repos/*/pulls:POST` |
-| K8s | `PATCH /apis/apps/v1/deployments` | `k8s[ctx=prod]:apps/v1/deployments:PATCH` |
+| AWS | `POST / Action=TerminateInstances` | `aws[profile=AKID]:ec2:TerminateInstances` |
+| GCP | `DELETE .../instances/{id}` | `gcp[project=myproj]:compute:instances.delete` |
+| Azure | `DELETE .../Microsoft.Compute/...` | `az[subscription=abc123]:Compute:virtualMachines.delete` |
+| GitHub | `POST /repos/x/pulls` | `gh:repos/x/pulls:POST` |
+| K8s | `DELETE /apis/apps/v1/namespaces/prod/deployments/web` | `k8s[ns=prod]:deployments:delete` |
 | Generic | `GET https://host/path` | `net:GET:host/path` |
 
 Parsers are pluggable. Unknown APIs fall back to `net:<METHOD>:<host>/<path>`.
@@ -32,15 +32,13 @@ Parsers are pluggable. Unknown APIs fall back to `net:<METHOD>:<host>/<path>`.
 
 ## Credential Qualifier Format
 
-`provider[key=value]:action`. The qualifier is derived from request context (AWS profile name from signing headers, GCP project from URL, K8s context, etc.). This makes the permission tree credential-aware — `aws[profile=dev]:s3:GetObject` and `aws[profile=prod]:s3:GetObject` are distinct actions with distinct permissions. Generic `net:` actions have no qualifier.
+`provider[key=value]:service:operation`. The qualifier is derived from request context (AWS access key ID from SigV4 Authorization header, GCP project from URL path, Azure subscription or account from URL, K8s namespace from path). This makes the permission tree credential-aware — `aws[profile=AKIAEXAMPLE1]:s3:GetObject` and `aws[profile=AKIAEXAMPLE2]:s3:GetObject` are distinct actions with distinct permissions. GitHub and generic `net:` actions have no qualifier.
 
 ---
 
 ## Baked-in Risk Taxonomy
 
-Safe/moderate/dangerous classification per provider, sourced from public IAM/RBAC docs. Embedded in binary, updatable via config override. Used for TUI risk display and permission tree schema validation.
-
-See [permission-tree.md § Schema](permission-tree.md#schema-compile-time-validation) for the full taxonomy format.
+Safe/moderate/dangerous classification based on the operation name in the canonical action string. Uses prefix matching (e.g., `Describe`/`List`/`Get`/`Head` → safe, `Delete`/`Terminate`/`Remove` → dangerous, `Create`/`Put`/`Start`/`Stop`/`Update` → moderate) plus lowercase keyword matching for non-AWS styles (e.g., `insert`, `patch`, `POST` → moderate). Unknown operations default to moderate. Used for TUI risk display.
 
 ---
 
@@ -57,16 +55,11 @@ The proxy makes the allow/deny decision on the **initial request only**, then be
 
 ### WebSocket
 
-1. Proxy intercepts the HTTP `Upgrade` request, parses action from the URL/headers
-2. Permission check on the upgrade request — one check at connect time
-3. If denied → return 403, no upgrade
-4. If allowed → complete the upgrade, then relay frames bidirectionally without inspection
+WebSocket upgrades are not currently supported. The proxy only handles HTTP/1.1 request/response cycles. A WebSocket `Upgrade` request would be parsed and permission-checked like any other request, but the upgrade handshake would not be completed.
 
 ### Revocation during a stream
 
-If a permission is revoked (one-shot consumed by another request) while a streaming connection or WebSocket is already open, **the existing connection is not interrupted**. The revocation takes effect on the next connection attempt.
-
-This is an acceptable gap. The alternative — tracking all open connections per rule and tearing them down on revocation — adds significant complexity for marginal security benefit. Long-lived connections are rare in the cloud API use case (most are short request/response), and WebSocket connections get a fresh check on reconnect.
+If a permission is revoked (one-shot consumed by another request) while a streaming connection is already open, **the existing connection is not interrupted**. The revocation takes effect on the next connection attempt.
 
 ---
 
@@ -78,17 +71,22 @@ When the proxy denies a request, it returns an HTTP response directly to the age
 HTTP/1.1 403 Forbidden
 Content-Type: application/json
 X-ClosedShell-Denied: true
+X-ClosedShell-Action: aws[profile=AKID]:ec2:TerminateInstances
+X-ClosedShell-Reason: no allow rule matched
+X-ClosedShell-Hint: pending human review in TUI
 
 {
-  "error": "denied",
-  "action": "aws[profile=prod]:ec2:TerminateInstances",
-  "reason": "forbidden by rule",
+  "error": "denied_by_closedshell",
+  "action": "aws[profile=AKID]:ec2:TerminateInstances",
+  "reason": "no allow rule matched",
   "risk_tier": "dangerous",
-  "hint": "pending human review in TUI"
+  "denied_by": "decider",
+  "hint": "pending human review in TUI",
+  "message": "[ClosedShell] Denied aws[profile=AKID]:ec2:TerminateInstances — no allow rule matched. pending human review in TUI"
 }
 ```
 
-The `X-ClosedShell-Denied` header lets agents programmatically distinguish proxy denials from upstream 403s.
+The `X-ClosedShell-Denied` header lets agents programmatically distinguish proxy denials from upstream 403s. The `X-ClosedShell-Action`, `X-ClosedShell-Reason`, and `X-ClosedShell-Hint` headers provide structured denial details without requiring JSON parsing.
 
 ---
 

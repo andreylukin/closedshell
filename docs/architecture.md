@@ -10,7 +10,7 @@
 ┌─────────────────────────────────────────────────────────┐
 │  macOS Host                                             │
 │                                                         │
-│  closedshell daemon (Rust)                              │
+│  cs daemon (Rust)                                       │
 │  ┌────────────┐ ┌───────────────────────┐               │
 │  │ Permission  │ │ MITM Proxy            │               │
 │  │ Tree        │ │ (rustls + hyper)      │               │
@@ -108,35 +108,38 @@ The MITM proxy needs sandboxed processes to trust its dynamically generated leaf
 ## Session Lifecycle
 
 ```
-cs <agent-command>
+cs [flags] -- <agent-command>
 
-1. Lookup working directory in sessions.db → resume or create session
-2. Load persistent CA from ~/.closedshell/ca.pem (or generate + trust on first run)
-3. Write combined trust store (CA + system roots) to sandbox tmpdir
-4. Generate seatbelt profile (.sb file)
-5. Start MITM proxy on localhost:8443
-6. Start Unix socket listener for TUI IPC
-7. Exec:
-   sandbox-exec -f /tmp/closedshell-XXXX/profile.sb \
-     env HTTPS_PROXY=http://localhost:8443 \
-         HTTP_PROXY=http://localhost:8443 \
-         SSL_CERT_FILE=/tmp/closedshell-XXXX/ca.pem \
-         CLOSEDSHELL_SOCKET=/tmp/closedshell-XXXX/cs.sock \
-     -- <agent-command>
-8. Print MOTD (if enabled)
-9. Open audit log: $PWD/closedshell-$SESSION_ID.log
-10. Agent runs. All HTTPS → proxy. TUI connects via Unix socket.
-11. On exit: tear down proxy, remove tmpdir. Permission tree + session metadata persisted to SQLite.
-   Log file persists.
+1. Load config, merge CLI flags
+2. Open sessions.db, crash recovery (mark dead PIDs as stopped)
+3. If --resume: restore permission tree from previous session in this directory
+4. Load persistent CA from ~/.closedshell/ca.pem (or generate + trust on first run)
+5. Write combined trust store (CA + system roots) to sandbox tmpdir
+6. Start MITM proxy on localhost:8443 (falls back to OS-assigned port if taken)
+7. Load templates into permission tree
+8. Generate seatbelt profile (.sb file)
+9. Start Unix socket listener for TUI IPC (enforcing mode only)
+10. Print MOTD, log session_start event, register session in DB
+11. Exec:
+    sandbox-exec -f /tmp/closedshell-XXXX/profile.sb \
+      env HTTPS_PROXY=http://localhost:$PORT \
+          HTTP_PROXY=http://localhost:$PORT \
+          SSL_CERT_FILE=/tmp/closedshell-XXXX/ca.pem \
+          CLOSEDSHELL_SOCKET=/tmp/closedshell-XXXX/cs.sock \
+          CLOSEDSHELL_SESSION=$SESSION_ID \
+      -- <agent-command>
+12. Agent runs. All HTTPS → proxy. TUI connects via Unix socket.
+13. On exit: log session_end, persist permission tree + session metadata to SQLite,
+    tear down proxy, remove tmpdir. Log file persists.
 ```
 
 ---
 
 ## Session Management
 
-Sessions are identified by **working directory**. When `cs <cmd>` runs, it looks up the working directory in the session database. If a session exists for that directory, its permission tree is restored. If not, a new session is created.
+Sessions are identified by **working directory**. When `cs --resume -- <cmd>` runs, it looks up the working directory in the session database. If a previous session exists for that directory, its permission tree rules are restored into a new session. Without `--resume`, every invocation starts a fresh session with an empty tree (plus any templates).
 
-This maps to how coding agents like Pi work — sessions are per-project, and resuming a session in the same directory should feel like picking up where you left off, permissions included.
+This maps to how coding agents work — sessions are per-project, and resuming a session in the same directory should feel like picking up where you left off, permissions included.
 
 ### Storage
 
@@ -146,45 +149,47 @@ This maps to how coding agents like Pi work — sessions are per-project, and re
 
 ```sql
 CREATE TABLE sessions (
-    id          TEXT PRIMARY KEY,       -- "8f3a-29c1"
-    workdir     TEXT NOT NULL UNIQUE,   -- working directory (one session per dir)
-    command     TEXT NOT NULL,          -- "pi", "claude-code", etc.
-    task        TEXT,                   -- current session task
-    status      TEXT NOT NULL,          -- "running", "stopped"
-    templates   TEXT,                   -- JSON array: ["aws-debug"]
-    pid         INTEGER,               -- daemon PID (detect crashes)
-    port        INTEGER NOT NULL,      -- proxy port
-    log_path    TEXT NOT NULL,          -- audit log path
+    id          TEXT PRIMARY KEY,
+    workdir     TEXT NOT NULL,
+    command     TEXT NOT NULL,
+    task        TEXT,
+    status      TEXT NOT NULL DEFAULT 'running',
+    templates   TEXT NOT NULL DEFAULT '[]',
+    pid         INTEGER NOT NULL,
+    port        INTEGER NOT NULL,
+    log_path    TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     last_used   TEXT NOT NULL,
-    total_decisions INTEGER DEFAULT 0,
-    total_denied    INTEGER DEFAULT 0
+    total_decisions INTEGER NOT NULL DEFAULT 0,
+    total_denied    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE rules (
-    id          TEXT PRIMARY KEY,       -- rule ID: "p-001"
-    session_id  TEXT NOT NULL REFERENCES sessions(id),
-    effect      TEXT NOT NULL,          -- "permit" or "forbid"
-    action      TEXT NOT NULL,          -- glob pattern
-    type        TEXT,                   -- "idempotent" or "one-shot"
-    rule_json   TEXT NOT NULL,          -- full rule as JSON
-    created_at  TEXT NOT NULL
+    id          TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    effect      TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    rule_type   TEXT,
+    rule_json   TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (id, session_id),
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 ```
 
 ### Lifecycle
 
 ```
-cs pi                                  # start or resume
-  1. Hash $PWD → lookup in sessions.db
-  2. Existing session found?
-     YES → restore permission tree from rules table, reuse session ID, append to existing log
+cs -- claude                               # start (or resume with --resume)
+  1. Lookup $PWD in sessions.db
+  2. --resume flag set and existing session found?
+     YES → restore permission tree from rules table, generate fresh session ID
      NO  → create new session, empty tree (+ templates if configured)
   3. Start sandbox, proxy, socket (as before)
   4. On exit:
      - Persist current permission tree to rules table
      - Update last_used, total_decisions, total_denied
-     - Set status = "stopped"
+     - Set status = "ended"
      - Tear down proxy, remove tmpdir
      - Log file persists
 ```
@@ -194,16 +199,15 @@ cs pi                                  # start or resume
 Three modes based on arguments:
 
 ```
-cs                                              # TUI — session manager
-cs 8f3a                                         # TUI — jump to specific session
-cs pi                                           # run agent in sandbox
-cs --task "fix bug" pi                          # with session task
-cs --template aws-debug pi                      # with templates
+cs                                              # TUI — hub (sessions + templates)
+cs --tui 8f3a                                   # TUI — attach to specific session
+cs -- claude                                    # run agent in sandbox
+cs --template anthropic/full -- claude          # with templates
 ```
 
-The full name `closedshell` is available as a symlink (installed by Homebrew or `make install`).
+The binary is `cs`. Homebrew and `make install` both install it as `cs`.
 
-**How disambiguation works:** if the argument matches a known session ID prefix, open the TUI for that session. Otherwise, treat it as a command to sandbox. Session IDs are short hex strings — no collision with real commands.
+**How disambiguation works:** `cs` with no arguments opens the hub. `cs --tui <id>` opens the TUI for a specific session. Everything else (after `--`) is treated as a command to sandbox.
 
 ### Sandbox flags
 
@@ -213,17 +217,20 @@ cs [flags] <command> [args...]
 
 | Flag | Description |
 |------|-------------|
-| `--task <text>` | Set session task (displayed in MOTD and audit log) |
 | `--template <name>` | Load permission template (repeatable) |
 | `--yolo` | Log-only mode — no blocking (see [§ YOLO Mode](#yolo-mode)) |
-| `--no-motd` | Suppress MOTD on start |
-| `--fresh` | Ignore existing session for this directory, start clean (new session ID, empty tree) |
+| `--resume` | Resume rules from previous session in this directory |
+| `--pf` | Enable pf secondary enforcement (requires root) |
+| `--pf-setup` | One-time system setup for pf enforcement (creates sandbox user + pf anchor) |
+| `--tui <SESSION_ID>` | Open TUI for existing session |
 
 ### TUI
 
 The TUI is the management interface. It runs in a separate terminal from the sandboxed agent.
 
-#### Session list (no args)
+#### Hub view (no args)
+
+The hub has two tabs: **Sessions** and **Templates**, switchable via `Tab` or `1`/`2`.
 
 ```
 ┌─ closedshell ─────────────────────────────────────────────┐
@@ -231,35 +238,35 @@ The TUI is the management interface. It runs in a separate terminal from the san
 │  ● 8f3a  ~/repos/myproject     pi    2m ago   12 decisions│
 │  ○ c91b  ~/repos/other         pi    3h ago   47 decisions│
 │                                                           │
-│ [enter] select  [n] new  [d] delete  [r] reset  [q] quit │
+│ [enter] select  [d] delete  [tab] templates  [q] quit    │
 └───────────────────────────────────────────────────────────┘
 ```
 
 `●` = running, `○` = stopped. Sorted by last activity.
 
-#### Session detail (select or `closedshell 8f3a`)
+#### Session detail (`cs --tui 8f3a` or select from hub)
 
-Tabs: **live**, **rules**, **approvals**
+Tabs: **Live**, **Policy**, **Approvals**
 
 **Live tab** — streaming decisions in real time:
 
 ```
 ┌─ 8f3a ~/repos/myproject ──────────────────────────────────┐
-│ [l]ive  [r]ules  [a]pprovals                               │
+│ [l]ive  [r] policy  [a]pprovals                            │
 ├───────────────────────────────────────────────────────────┤
 │ 14:32:01 ✓ aws[profile=dev]:s3:ListBuckets      tree     │
 │ 14:32:03 ✓ aws[profile=dev]:ec2:Describe*        tree     │
 │ 14:32:05 ✗ aws[profile=prod]:ec2:Terminate*      tree     │
 │ 14:32:08 ? aws[profile=prod]:ecs:UpdateService   pending  │
 │                                                           │
-│ [y] approve  [n] deny  [f] forbid  [e] edit rules        │
+│ [f] filter  [/] search  [?] help                         │
 └───────────────────────────────────────────────────────────┘
 ```
 
-**Rules tab** — current permission tree:
+**Policy tab** — current permission tree:
 
 ```
-┌─ 8f3a rules ──────────────────────────────────────────────┐
+┌─ 8f3a policy ─────────────────────────────────────────────┐
 │ FORBID                                                    │
 │  f-001  aws[profile=prod]:*:Delete*       (session policy)│
 │  f-002  aws[profile=prod]:*:Terminate*    (session policy)│
@@ -269,7 +276,7 @@ Tabs: **live**, **rules**, **approvals**
 │  p-002  aws[profile=*]:*:List*            idempotent      │
 │  p-003  aws[profile=prod]:ecs:Update*     one-shot (used) │
 │                                                           │
-│ [e] edit in $EDITOR  [f] add forbid  [d] delete rule      │
+│ [e] edit in $EDITOR  [d] delete rule                      │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -288,35 +295,37 @@ Tabs: **live**, **rules**, **approvals**
 
 #### Rule editing
 
-Pressing `e` on the rules tab opens `~/.closedshell/sessions/<id>/rules.yaml` in `$EDITOR`. The daemon watches the file and hot-reloads on save:
+Pressing `e` on the Policy tab opens the session rules in `$EDITOR` as a `.csp` file:
 
-1. User presses `e` → TUI writes current tree to `rules.yaml`, opens `$EDITOR`
+1. User presses `e` → TUI writes current tree to a temp `.csp` file, opens `$EDITOR`
 2. User edits rules (add forbids, remove permits, adjust globs)
 3. User saves and exits `$EDITOR`
-4. Daemon detects file change → validates against schema
-5. Valid → tree replaced, TUI shows updated rules
-6. Invalid → TUI shows validation errors, tree unchanged, offers to re-edit
-
-Forbid rules from org baseline or templates cannot be removed via edit — they're marked `# locked` in the file and the daemon rejects edits that remove them.
+4. TUI parses the updated `.csp` file
+5. Valid → rules reloaded via IPC, TUI shows updated policy
+6. Invalid → changes discarded
 
 #### TUI keybindings
 
 | Key | Context | Action |
 |-----|---------|--------|
-| `l` | session | switch to live tab |
-| `r` | session | switch to rules tab |
-| `a` | session | switch to approvals tab |
-| `y` | live/approvals | approve pending request |
-| `n` | live/approvals | deny pending request |
-| `f` | live/rules | add forbid rule (inline prompt) |
-| `e` | rules | edit rules in `$EDITOR` |
-| `d` | rules/sessions | delete rule / delete session |
-| `/` | history | search |
-| `q` | any | back / quit |
+| `l` / `1` | session | switch to Live tab |
+| `r` / `2` | session | switch to Policy tab |
+| `a` / `3` | session | switch to Approvals tab |
+| `Tab` | session/hub | cycle tabs |
+| `y` | approvals | approve pending request |
+| `n` | approvals | deny pending request |
+| `f` | live | cycle activity filter (all/allow/deny) |
+| `e` | policy | edit rules in `$EDITOR` |
+| `d` | policy/hub | delete rule / delete session |
+| `/` | live | search activity |
+| `?` | session | help overlay |
+| `j`/`k` | any | scroll down/up |
+| `g`/`G` | session | jump to top/bottom |
+| `q` / `Esc` | any | back / quit |
 
 ### Crash recovery
 
-On startup, check for rows where `status = "running"` but `pid` is dead. Mark them `"stopped"`. Next `cs <cmd>` in that directory resumes normally.
+On startup, check for rows where `status = "running"` but `pid` is dead. Mark them `"crashed"`. Next `cs --resume -- <cmd>` in that directory resumes normally.
 
 ### One-shot rules across sessions
 
@@ -326,7 +335,7 @@ One-shot rules that were consumed are deleted from the `rules` table on persist.
 
 ## YOLO Mode
 
-`yolo: true` in config or `cs --yolo pi` on the command line. The proxy still intercepts and parses every request, but **never blocks**. All decisions are logged as `allow (yolo)`. Forbid rules are still evaluated and logged as `would_deny (yolo)` but don't block.
+`cs --yolo -- <cmd>` on the command line (or `yolo: true` in config YAML). The proxy still intercepts and parses every request, but **never blocks**. All decisions are logged as `allow (yolo)`. Forbid rules are still evaluated and logged as `would_deny (yolo)` but don't block.
 
 Use case: dev environments where you want visibility into what the agent is doing without friction. You can review the audit log after the fact and use it to build templates for production sessions.
 
@@ -339,11 +348,10 @@ MOTD shows `[closedshell] mode: yolo` when active.
 Printed to stderr on sandbox start when `motd: true` (default). Tells the human (or agent) what's active:
 
 ```
-[closedshell] session 8f3a-29c1 (resumed)
-[closedshell] task: investigate 503s in us-east-1
+[closedshell] session 8f3a29c1 (resumed)
 [closedshell] templates: aws-debug, github-readonly
-[closedshell] permits: 6 | forbids: 2
-[closedshell] log: ./closedshell-8f3a-29c1.log
+[closedshell] mode: enforcing
+[closedshell] log: ./closedshell-8f3a29c1.log
 ```
 
 New sessions show `(new)` instead of `(resumed)`. Kept terse — one line per fact, no box drawing, no instructions. Agents that parse stderr can ignore the `[closedshell]` prefix.
@@ -389,7 +397,7 @@ Unix socket, newline-delimited JSON. One request, one response. No streaming, no
 
 ## Audit Log
 
-Newline-delimited JSON file written to the working directory: `closedshell-<session-id>.log`. Persists after session ends. One line per event.
+Newline-delimited JSON file written to `~/.closedshell/logs/<encoded-cwd>/closedshell-<session-id>.log`. Persists after session ends. One line per event.
 
 The agent can read this file (seatbelt allows reads) — that's fine per the threat model.
 
@@ -408,7 +416,7 @@ Every proxy decision produces a log entry. Common envelope:
 
 ### Event types
 
-**`decision`** — every allow/deny through the proxy or `ask` CLI:
+**`decision`** — every allow/deny through the proxy:
 
 ```json
 {
@@ -483,8 +491,9 @@ Every proxy decision produces a log entry. Common envelope:
 | `rustls` | TLS termination + upstream TLS |
 | `rcgen` | Persistent CA + dynamic leaf cert generation per SNI |
 | `hyper` | HTTP parsing in the proxy |
-| `serde` / `serde_yaml` | Config, permission tree serialization |
+| `serde` / `serde_json` / `serde_yaml` | Config (YAML), permission tree + IPC + audit (JSON) |
 | `clap` | CLI argument parsing |
+| `ratatui` / `crossterm` | Terminal UI |
 
 No special crate for seatbelt — the profile is a generated `.sb` file passed to `sandbox-exec` via `std::process::Command`.
 
@@ -541,16 +550,16 @@ Each criterion is a test you can run. Section 1 is done when all sandbox + proxy
 | P2 | Agent runs `aws s3 ls` through proxy (no permission in tree) | Proxy parses `aws[profile=...]:s3:ListBuckets`, blocks for human approval |
 | P3 | Manually add `permit aws[profile=*]:s3:List*` to tree, re-run `aws s3 ls` | Proxy matches permit, forwards request, agent gets bucket list |
 | P4 | Agent makes request to unknown host | Proxy parses as `net:METHOD:host/path`, returns deny |
-| P5 | Verify CA is persistent | Two `closedshell` invocations reuse the same CA from `~/.closedshell/ca.pem` |
+| P5 | Verify CA is persistent | Two `cs` invocations reuse same CA from `~/.closedshell/ca.pem` |
 | P6 | Verify upstream TLS works | Proxy connects to real upstream with system trust store (not ClosedShell CA) |
 
 ### Session Lifecycle
 
 | # | Test | Pass condition |
 |---|------|---------------|
-| L1 | `closedshell /bin/sh` | Sandbox starts, proxy listening, Unix socket exists, MOTD displayed |
+| L1 | `cs -- /bin/sh` | Sandbox starts, proxy listening, Unix socket exists, MOTD displayed |
 | L2 | Agent exits | Proxy stops, tmpdir removed, socket gone |
-| L3 | `closedshell pi` with `passthrough_env` in config | Configured env vars available inside sandbox |
+| L3 | `cs -- claude` with `passthrough_env` in config | Configured env vars available inside sandbox |
 | L4 | Kill daemon while agent is running | Agent's next network call fails cleanly (connection refused, not hang) |
 
 ### TUI + IPC

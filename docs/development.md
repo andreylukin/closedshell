@@ -1,6 +1,6 @@
 # Development Sections
 
-The project is broken into independently iterable sections, ordered by dependency.
+The project was broken into independently iterable sections, ordered by dependency. All sections are complete.
 
 ---
 
@@ -17,7 +17,7 @@ Everything that makes the sandbox work end-to-end. This is one integrated delive
 - Tree lookup on every request — unknown = block for human approval
 - `cs <cmd>` lifecycle + session persistence (SQLite)
 
-**Deliverable:** A locked sandbox where all network traffic is intercepted, parsed, and checked against the permission tree. End-to-end from `closedshell claude` to denied/approved request.
+**Deliverable:** A locked sandbox where all network traffic is intercepted, parsed, and checked against the permission tree. End-to-end from `cs claude` to denied/approved request.
 
 ---
 
@@ -61,7 +61,7 @@ The management interface and escalation path. See [architecture.md § TUI](archi
 - Rule editing via `$EDITOR` with hot-reload
 - Add forbid rules inline from TUI
 
-**Deliverable:** `closedshell` (no args) opens a TUI. Human can watch decisions live, approve/deny pending actions, and edit rules.
+**Deliverable:** `cs` (no args) opens a TUI. Human can watch decisions live, approve/deny pending actions, and edit rules.
 
 ---
 
@@ -74,8 +74,10 @@ Section 1 (sandbox+daemon+proxy) ──→ Section 3 (enforcing + human approval
                                  ──→ Section 4 (TUI)
 ```
 
-## Recommended Build Order (solo dev)
+## Build Order (completed)
 
 1. **Section 1 + Section 2** in parallel
 2. **Section 3** (enforcing mode + approval queue)
 3. **Section 4** (TUI)
+
+All sections shipped. This document is retained as architectural reference.

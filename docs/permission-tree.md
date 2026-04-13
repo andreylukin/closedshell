@@ -17,56 +17,58 @@ We evaluated AWS IAM, Cedar, Kubernetes RBAC, Zanzibar/SpiceDB, OPA/Rego, and ca
 | **No wildcards in entity IDs** | Deliberate restriction | Fast matching, analyzable |
 | **Conditions (when/unless)** | First-class | Not used — permissions are re-evaluated per request |
 
-What we don't take from Cedar: its policy *language*. We don't need a DSL — permissions are created by templates, human approvals via the TUI, and the operator CLI. We take Cedar's **evaluation model** and **data model**.
+What we don't take from Cedar: its full policy *language*. We use a lightweight Cedar-inspired DSL (`.csp` files) for templates, plus human approvals via the TUI. We take Cedar's **evaluation model** and **data model**.
 
 ---
 
 ## Permission Format
 
-Every permission in the tree is a **rule** with an effect:
+Every permission in the tree is a **rule** (`Rule` struct in `permission.rs`) with an effect:
 
-```yaml
-session: "8f3a-29c1"
-rules:
+```
+Rules in a session:
+
   # Forbid rules — evaluated first, override everything
-  - id: "f-001"
-    effect: forbid
-    action: "aws[profile=prod]:*:Delete*"
-    reason: "session policy: no production deletes"
+  id: "f-001"
+  effect: Forbid
+  action: "aws[profile=prod]:*:Delete*"
+  reason: "session policy: no production deletes"
+  source: "template:restrict-prod"
 
-  - id: "f-002"
-    effect: forbid
-    action: "aws[profile=prod]:*:Terminate*"
-    reason: "session policy: no production terminates"
+  id: "f-002"
+  effect: Forbid
+  action: "aws[profile=prod]:*:Terminate*"
+  reason: "session policy: no production terminates"
+  source: "template:restrict-prod"
 
   # Permit rules — only checked if no forbid matches
-  - id: "p-001"
-    effect: permit
-    action: "aws[profile=dev]:ec2:Describe*"
-    type: idempotent
-    approved_by: template:aws-debug
-    created: "2026-04-03T14:00:00Z"
+  id: "template:aws-debug:0"
+  effect: Permit
+  action: "aws[profile=dev]:ec2:Describe*"
+  rule_type: Idempotent
+  source: "template:aws-debug"
 
-  - id: "p-002"
-    effect: permit
-    action: "aws[profile=prod]:ecs:UpdateService"
-    type: one-shot
-    approved_by: human:@oncall
-    consumed: false
-    expires: "2026-04-03T16:00:00Z"
+  id: "p-002"
+  effect: Permit
+  action: "aws[profile=prod]:ecs:UpdateService"
+  rule_type: OneShot { consumed: false }
+  approved_by: "human"
+  expires: "2026-04-03T16:00:00Z"
 
-  - id: "p-003"
-    effect: permit
-    action: "net:GET:api.github.com/repos/.*"
-    type: idempotent
-    approved_by: human:andrey
+  id: "p-003"
+  effect: Permit
+  action: "net:GET:api.github.com/repos/*"
+  rule_type: Idempotent
+  approved_by: "human"
 ```
 
-### Key differences from current spec
+### Key properties
 
-1. **`effect` field** — every rule is explicitly `permit` or `forbid` (Cedar's model). No implicit "everything is a permit."
-2. **Two permit types only** — `idempotent` (persistent) and `one-shot` (consumed on use).
+1. **`effect` field** — every rule is explicitly `Permit` or `Forbid` (Cedar's model). No implicit "everything is a permit."
+2. **Two permit types only** — `Idempotent` (persistent) and `OneShot` (consumed on use). Stored in the `rule_type` field.
 3. **Forbid rules are first-class** — durable rules in the tree that can't be overridden by any permit.
+4. **`source`** — tracks origin (e.g. `template:anthropic-full`). Set for template-loaded rules.
+5. **`approved_by`** — tracks who authorized a permit (e.g. `human`). Set for human-approved rules.
 
 ---
 
@@ -140,7 +142,7 @@ Action matching uses **glob patterns** (not regex):
 | `net:GET:api.github.com/*` | `net:GET:api.github.com/repos/foo` | `net:POST:api.github.com/repos/foo` |
 | `aws[profile=*]:s3:List*` | `aws[profile=dev]:s3:ListBuckets` | `gcp[project=x]:storage:ListBuckets` |
 
-**Why glob, not regex:** Glob is sufficient for hierarchical action matching and is statically analyzable — you can determine if two patterns overlap, if one subsumes another, or if a forbid makes a permit unreachable. Full regex makes these analyses undecidable. The `*` wildcard matches any characters within a single segment or at the end of a pattern. No `.*`, no `[a-z]+`, no lookahead.
+**Why glob, not regex:** Glob is sufficient for hierarchical action matching and is statically analyzable — you can determine if two patterns overlap, if one subsumes another, or if a forbid makes a permit unreachable. Full regex makes these analyses undecidable. The `*` wildcard matches any characters including `/` separators (internally promoted to `**` for cross-segment matching). No `.*`, no `[a-z]+`, no lookahead.
 
 ### Generic actions
 
@@ -155,131 +157,67 @@ net:POST:hooks.slack.com/services/T00/B00/xxx
 
 ## Rule Types
 
-### `idempotent`
+### `Idempotent`
 
-Persistent for the session. Once granted, matches on every subsequent request. Safe reads, listing operations.
+Persistent for the session. Once granted, matches on every subsequent request. Safe reads, listing operations. Template-loaded permits are always `Idempotent`.
 
-```yaml
-- effect: permit
-  action: "aws[profile=dev]:s3:List*"
-  type: idempotent
-  approved_by: template:aws-debug
+```
+effect: Permit
+action: "aws[profile=dev]:s3:List*"
+rule_type: Idempotent
+source: "template:aws-debug"
 ```
 
-### `one-shot`
+### `OneShot`
 
-Consumed on first use. Automatically removed from the tree after a single successful match. For state-changing operations where you want explicit, single-use authorization.
+Consumed on first use. Skipped on subsequent evaluations (the `consumed` flag flips to `true`). For state-changing operations where you want explicit, single-use authorization.
 
-```yaml
-- effect: permit
-  action: "aws[profile=prod]:ecs:UpdateService"
-  type: one-shot
-  approved_by: human:@oncall
+```
+effect: Permit
+action: "aws[profile=prod]:ecs:UpdateService"
+rule_type: OneShot { consumed: false }
+approved_by: "human"
 ```
 
-### `forbid`
+### `Forbid`
 
-Hard deny. No type field — forbids are always active for the session (or until explicitly removed by the operator, not the agent).
+Hard deny. No `rule_type` field — forbids are always active for the session (or until explicitly removed by the operator, not the agent).
 
-```yaml
-- effect: forbid
-  action: "aws[profile=prod]:*:Delete*"
-  reason: "org policy: no production deletes in automated sessions"
-  source: org_baseline  # or: session_policy, human:@admin
+```
+effect: Forbid
+action: "aws[profile=prod]:*:Delete*"
+reason: "org policy: no production deletes in automated sessions"
+source: "template:restrict-prod"
 ```
 
 ---
 
 ## Forbid Rule Sources
 
-Forbid rules can come from multiple sources, in order of authority:
+Forbid rules can come from multiple sources:
 
-1. **Org baseline** — Baked into config. Applied to every session. Cannot be removed within a session.
-2. **Session policy** — Set at `closedshell` start time via flags or config. Cannot be modified by the agent.
-3. **Human operator** — Added via TUI rule editor or `closedshell forbid` on the host side during a session.
-4. **Template** — Loaded from template files. Cannot be removed within a session.
+1. **Template** — Loaded from `.csp` template files at session start. Tagged `source: template:<name>`.
+2. **Human operator** — Added via TUI during a session.
 
 The agent **cannot** create forbid rules. This is deliberate — the agent shouldn't be able to restrict its own permissions in a way that prevents recovery.
-
-### Org Baseline
-
-Forbid rules that apply to every session. Defined in the global config file (`~/.closedshell/config.yaml`) under `baseline_forbids`:
-
-```yaml
-# ~/.closedshell/config.yaml
-baseline_forbids:
-  - action: "aws[profile=prod]:*:Delete*"
-    reason: "org policy: no production deletes"
-  - action: "aws[profile=prod]:*:Terminate*"
-    reason: "org policy: no production terminates"
-```
-
-These are loaded before templates, cannot be removed by templates, the TUI rule editor, or the agent. They're tagged `source: org_baseline` and marked `# locked` in the editable rules file.
 
 ---
 
 ## Rule Metadata
 
-### `approved_by` format
+### `approved_by`
 
-Tracks who authorized a permit rule:
+Tracks who authorized a permit rule. Currently set to `"human"` for rules approved via the TUI. Template-loaded rules leave this `None` (they use `source` instead).
 
-| Format | Meaning | Example |
-|--------|---------|---------|
-| `human:<id>` | Approved by a human operator via TUI | `approved_by: human:andrey` |
-| `template:<name>` | Loaded from a template | `approved_by: template:aws-debug` |
+### `source`
 
-The `<id>` in `human:<id>` is a free-form string set in config (`operator_id: andrey`). Defaults to the system username. Used for audit trail only — no auth system behind it.
-
-### `source` format (forbid rules)
-
-| Format | Meaning | Removable? |
-|--------|---------|------------|
-| `org_baseline` | From global config | No |
-| `session_policy` | From session flags/config | No |
-| `template:<name>` | From a template | No |
-| `human:<id>` | Added by operator during session | Yes (by operator only) |
+Tracks where a rule came from. Template-loaded rules are tagged `"template:<name>"` (e.g. `"template:anthropic-full"`). Used for both permit and forbid rules loaded from templates.
 
 ---
 
-## Schema (compile-time validation)
+## Risk Classification
 
-The permission tree validates rules against a schema derived from the risk taxonomy:
-
-```yaml
-providers:
-  aws:
-    qualifiers: [profile]
-    services:
-      ec2:
-        safe:      [Describe*, List*, Get*]
-        moderate:  [Create*, Start*, Stop*, Update*, Tag*]
-        dangerous: [Delete*, Terminate*, Remove*, Revoke*, Detach*]
-      s3:
-        safe:      [List*, Get*, Head*]
-        moderate:  [Put*, Create*]
-        dangerous: [Delete*]
-      # ...
-  gcp:
-    qualifiers: [project]
-    services:
-      compute:
-        safe:      [list, get, aggregatedList]
-        moderate:  [insert, patch, update, start, stop]
-        dangerous: [delete]
-      # ...
-  net:
-    qualifiers: []
-    methods: [GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS]
-```
-
-Validation checks:
-- Action string parses correctly (provider, qualifier, service, operation)
-- Provider exists in schema
-- Qualifier keys are valid for that provider
-- Operation matches at least one known pattern (warning if not — could be a new API)
-- Forbid rules on `dangerous` tier operations are flagged as expected
-- Permit rules on `dangerous` tier operations require `approved_by: human:<id>`
+Actions are classified at runtime into risk tiers (`safe`, `moderate`, `dangerous`) by the `risk::classify_risk` function. This classification is used for display in the TUI and in denial responses — it does not affect evaluation. The permission tree itself does not validate rules against a schema; any well-formed action glob is accepted.
 
 ---
 
@@ -340,7 +278,7 @@ cs \
 Merge rules:
 - Templates are applied in order. Later templates can add rules but **cannot remove forbids** from earlier templates.
 - Forbid rules from templates are tagged `source: template:<name>` and cannot be removed within the session.
-- Permit rules from templates are tagged `approved_by: template:<name>` and behave like any other permit (can be revoked, can expire).
+- Permit rules from templates are tagged `source: template:<name>` and behave like any other permit.
 - If two templates define conflicting permits for the same action pattern, both are added (harmless — first match wins, and forbid-overrides-permit ensures safety).
 
 Templates eliminate cold start latency: instead of the human approving `Describe*` on every session, the template pre-loads it.
@@ -398,41 +336,24 @@ Agent: aws s3 rm s3://bucket/key
 
 ### Denial UX
 
-**Unknown action (pending approval):**
+All denials return a 403 with structured JSON and headers:
+
 ```
 HTTP/1.1 403 Forbidden
+Content-Type: application/json
 X-ClosedShell-Denied: true
+X-ClosedShell-Action: aws:ec2:TerminateInstances
+X-ClosedShell-Reason: no matching permission
+X-ClosedShell-Hint: pending human review in TUI
 
 {
-  "error": "denied",
+  "error": "denied_by_closedshell",
   "action": "aws:ec2:TerminateInstances",
+  "reason": "no matching permission",
   "risk_tier": "dangerous",
-  "hint": "pending human review in TUI"
+  "denied_by": "decider",
+  "hint": "pending human review in TUI",
+  "message": "[ClosedShell] Denied aws:ec2:TerminateInstances — no matching permission. pending human review in TUI"
 }
 ```
 
-**One-shot consumed:**
-```
-HTTP/1.1 403 Forbidden
-X-ClosedShell-Denied: true
-
-{
-  "error": "denied",
-  "action": "aws:ecs:UpdateService",
-  "reason": "permission p-002 consumed (one-shot)",
-  "hint": "pending human review in TUI"
-}
-```
-
----
-
-## Comparison with Previous Design
-
-| Aspect | Previous (v0.2) | Current (Cedar-inspired) |
-|---|---|---|
-| Effects | Allow-only (implicit) | Explicit `permit` / `forbid` |
-| Safety rails | Flat allow list | Forbid rules are hard limits |
-| Action matching | Regex | Glob |
-| Unknown actions | Default deny | Block for human approval via TUI |
-| Schema validation | Not specified | Compile-time validation against risk taxonomy |
-| Evaluation model | Check tree → deny | Forbid check → permit check → human approval → deny |
