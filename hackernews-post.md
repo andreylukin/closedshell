@@ -6,37 +6,14 @@
 
 **Text:**
 
-Agents inherit every credential on your machine — AWS keys, GitHub tokens, kubectl configs — and nobody checks what they do with them. A Replit agent deleted a production database after ignoring instructions 11 times. Amazon Q was tricked via a poisoned PR into terminating EC2 instances.
+Agents inherit every credential on your machine. AWS keys, GitHub tokens, kubectl configs. And nobody checks what they do with them. A Replit agent deleted a production database after ignoring instructions 11 times. Amazon Q was tricked via a poisoned PR into terminating EC2 instances.
 
 ClosedShell is a macOS sandbox that intercepts every outbound HTTPS request from your agent, parses it into a human-readable action, and checks it against your policy. One Rust binary, no root, no kernel extensions.
 
-    brew install andreylukin/tap/closedshell
-    cs --template anthropic/full --template github/readonly -- claude
+You define what's allowed using simple policy templates in a Cedar-inspired format. Templates ship for common providers (Anthropic, OpenAI, GitHub, Exa) and you can stack them to build the exact permission surface you want. Give Claude access to its own API but restrict GitHub to read-only. Give Codex full OpenAI and full GitHub. Restrict a search API to just the search endpoint while blocking its other routes. The format is just permit/forbid rules with glob patterns.
 
-Policies are simple templates using a Cedar-inspired format. Stack them to build the exact permission surface you want:
+Forbid always beats permit. Everything not explicitly permitted blocks and asks you in a live terminal UI. The proxy holds the connection until you decide.
 
-    # Let Claude talk to its own API, but let it only read GitHub
-    cs --template anthropic/full --template github/readonly -- claude
+If you don't know what your agent calls yet, you can run in YOLO mode (log everything, block nothing) and then auto-generate a template from observed traffic. Observe first, enforce later.
 
-    # Give Codex full OpenAI + full GitHub access
-    cs --template openai/full --template github/full -- codex
-
-What a template looks like — github/readonly:
-
-    permit (action == "net:GET:api.github.com/*");
-    permit (action == "net:GET:github.com/*");
-
-Or restrict an API to specific endpoints — exa/search-only:
-
-    forbid (action == "net:*:api.exa.ai/contents");
-    forbid (action == "net:*:api.exa.ai/findSimilar");
-    permit (action == "net:*:api.exa.ai/search");
-
-Forbid always beats permit. Everything not explicitly permitted blocks and asks you in a live TUI. The proxy holds the connection until you decide.
-
-Don't know what your agent calls? Run YOLO mode first, then generate a template from observed traffic:
-
-    cs --yolo -- claude
-    cs template generate <session-id> --name myservice --save
-
-macOS only (uses Seatbelt). MIT licensed. Linux contributions welcome.
+macOS only (uses Seatbelt for sandboxing). MIT licensed. Linux contributions welcome.
