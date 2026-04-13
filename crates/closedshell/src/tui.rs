@@ -643,6 +643,14 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    if let Some(ref info) = app.session_info {
+        if !info.templates.is_empty() {
+            spans.push(Span::styled(
+                format!("  [{}]", info.templates.join(", ")),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+    }
     if !app.rules.is_empty() {
         spans.push(Span::styled(
             "  rules=",
@@ -1433,6 +1441,15 @@ pub fn run_hub(db: &closedshell_lib::db::SessionDb, templates_dir: &std::path::P
                                 spans.push(Span::styled(
                                     format!("  {}", truncate(cmd, 30)),
                                     Style::default().fg(Color::DarkGray),
+                                ));
+                            }
+                            // Show templates used
+                            let tpls: Vec<String> =
+                                serde_json::from_str(&s.templates).unwrap_or_default();
+                            if !tpls.is_empty() {
+                                spans.push(Span::styled(
+                                    format!("  [{}]", tpls.join(", ")),
+                                    Style::default().fg(Color::Yellow),
                                 ));
                             }
                             if s.total_decisions > 0 {
