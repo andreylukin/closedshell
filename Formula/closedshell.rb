@@ -2,7 +2,7 @@ class Closedshell < Formula
   desc "macOS sandbox for AI coding agents — network-level permission enforcement"
   homepage "https://github.com/andreylukin/closedshell"
   license "MIT"
-  version "0.1.0"
+  version "0.1.1"
 
   on_macos do
     if Hardware::CPU.arm?
