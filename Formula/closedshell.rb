@@ -22,19 +22,10 @@ class Closedshell < Formula
     (share/"closedshell/templates").install Dir["templates/*"] if Dir.exist?("templates")
   end
 
-  def post_install
-    templates_src = share/"closedshell/templates"
-    return unless templates_src.exist?
-
-    templates_dst = Pathname.new(Dir.home)/".closedshell"/"templates"
-    templates_dst.mkpath
-    FileUtils.cp_r(Dir["#{templates_src}/*"], templates_dst, remove_destination: true)
-  end
-
   def caveats
     <<~EOS
-      Bundled templates installed to:
-        ~/.closedshell/templates
+      To install bundled templates, run:
+        mkdir -p ~/.closedshell/templates && cp -R #{share}/closedshell/templates/* ~/.closedshell/templates/
     EOS
   end
 
