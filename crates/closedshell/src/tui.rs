@@ -75,7 +75,6 @@ struct RuleEntry {
     effect: String,
     pattern: String,
     source: Option<String>,
-    rule_type: Option<String>,
     reason: Option<String>,
 }
 
@@ -325,10 +324,6 @@ impl App {
                             .get("source")
                             .and_then(|s| s.as_str())
                             .map(|s| s.to_string()),
-                        rule_type: v
-                            .get("rule_type")
-                            .and_then(|s| s.as_str())
-                            .map(|s| s.to_string()),
                         reason: v
                             .get("reason")
                             .and_then(|s| s.as_str())
@@ -340,7 +335,7 @@ impl App {
     }
 
     fn tab_names(&self) -> Vec<&str> {
-        vec!["Live", "Rules", "Approvals"]
+        vec!["Live", "Policy", "Approvals"]
     }
 
     fn poll_approvals(&mut self) {
@@ -671,13 +666,31 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_rules_tab(f: &mut Frame, app: &App, area: Rect) {
-    // Cedar-style multi-line rule display:
-    //   permit (action == "net:*:api.anthropic.com/*")
-    //     when { source: template:anthropic/full, type: idempotent };
+    // CSP policy format:
+    //   permit (action == "net:*:api.anthropic.com/*");  // template:anthropic/full
+    //   forbid (action == "aws:iam:*")
+    //     reason("no IAM changes");  // template:restrict
     let visible_height = area.height.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::new();
 
+    // Group rules by source for visual grouping
+    let mut current_source: Option<&str> = None;
     for (i, r) in app.rules.iter().enumerate() {
+        // Source header when source changes
+        let src = r.source.as_deref();
+        if src != current_source {
+            if i > 0 {
+                lines.push(Line::from(""));
+            }
+            if let Some(s) = src {
+                lines.push(Line::from(Span::styled(
+                    format!("// {}", s),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            current_source = src;
+        }
+
         let (effect_color, effect_str) = match r.effect.as_str() {
             "permit" => (Color::Green, "permit"),
             "forbid" => (Color::Red, "forbid"),
@@ -686,7 +699,10 @@ fn draw_rules_tab(f: &mut Frame, app: &App, area: Rect) {
         let selected = i == app.selected_rule;
         let marker = if selected { "▸ " } else { "  " };
 
-        // Line 1: effect (action == "pattern")
+        let has_reason = r.reason.is_some();
+        let semi = if has_reason { "" } else { ";" };
+
+        // Main line: effect (action == "pattern");
         lines.push(Line::from(vec![
             Span::styled(marker, Style::default().fg(Color::Yellow)),
             Span::styled(
@@ -696,34 +712,27 @@ fn draw_rules_tab(f: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" (", Style::default().fg(Color::DarkGray)),
-            Span::raw(format!("action == \"{}\"", r.pattern)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
+            Span::raw("action"),
+            Span::styled(" == ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("\"{}\"", r.pattern),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(format!("){}", semi), Style::default().fg(Color::DarkGray)),
         ]));
 
-        // Line 2: when { source: ..., type: ... };
-        let mut attrs: Vec<String> = Vec::new();
-        if let Some(ref src) = r.source {
-            attrs.push(format!("source: {}", src));
-        }
-        if let Some(ref rt) = r.rule_type {
-            attrs.push(format!("type: {}", rt));
-        }
+        // Reason line for forbid rules
         if let Some(ref reason) = r.reason {
-            attrs.push(format!("reason: \"{}\"", truncate(reason, 50)));
-        }
-        if !attrs.is_empty() {
             lines.push(Line::from(vec![
                 Span::raw("    "),
-                Span::styled("when", Style::default().fg(Color::DarkGray)),
-                Span::styled(" { ", Style::default().fg(Color::DarkGray)),
-                Span::styled(attrs.join(", "), Style::default().fg(Color::DarkGray)),
-                Span::styled(" };", Style::default().fg(Color::DarkGray)),
+                Span::styled("reason", Style::default().fg(Color::DarkGray)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("\"{}\"", truncate(reason, 60)),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(");", Style::default().fg(Color::DarkGray)),
             ]));
-        }
-
-        // Blank line between rules
-        if i < app.rules.len() - 1 {
-            lines.push(Line::from(""));
         }
     }
 
@@ -736,7 +745,7 @@ fn draw_rules_tab(f: &mut Frame, app: &App, area: Rect) {
     };
     let visible_lines: Vec<Line> = lines.into_iter().skip(skip).take(visible_height).collect();
 
-    let title = format!(" Rules ({})  [d] delete  [e] edit ", app.rules.len());
+    let title = format!(" Policy ({})  [d] delete  [e] edit ", app.rules.len());
     let paragraph = Paragraph::new(visible_lines).block(
         Block::default()
             .title(title)
@@ -1120,20 +1129,32 @@ pub fn run(session_id: &str, db_log_path: Option<&std::path::Path>) -> Result<()
 
                 // Rule editing (tab 1) — open $EDITOR
                 KeyCode::Char('e') if app.active_tab == 1 => {
-                    // Write current rules to temp YAML, open in $EDITOR, reload on save
+                    // Write current rules as .csp, open in $EDITOR, reload on save
                     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
                     let tmpfile = std::env::temp_dir()
-                        .join(format!("closedshell-rules-{}.yaml", app.session_id));
+                        .join(format!("closedshell-rules-{}.csp", app.session_id));
 
-                    // Serialize current rules to YAML
-                    let mut yaml = String::from("# Edit rules below. Save and exit to apply.\n");
-                    yaml.push_str("# Lines starting with # are ignored.\n");
-                    yaml.push_str("# Format: effect action [source]\n\n");
+                    // Serialize current rules to CSP format
+                    let mut csp = String::from("// Edit policy below. Save and exit to apply.\n\n");
                     for r in &app.rules {
-                        let source = r.source.as_deref().unwrap_or("");
-                        yaml.push_str(&format!("{} {}  # {}\n", r.effect, r.pattern, source));
+                        let source_comment = r
+                            .source
+                            .as_deref()
+                            .map(|s| format!("  // {}", s))
+                            .unwrap_or_default();
+                        if let Some(ref reason) = r.reason {
+                            csp.push_str(&format!(
+                                "{} (action == \"{}\")\n  reason(\"{}\");{}\n",
+                                r.effect, r.pattern, reason, source_comment
+                            ));
+                        } else {
+                            csp.push_str(&format!(
+                                "{} (action == \"{}\");{}\n",
+                                r.effect, r.pattern, source_comment
+                            ));
+                        }
                     }
-                    let _ = std::fs::write(&tmpfile, &yaml);
+                    let _ = std::fs::write(&tmpfile, &csp);
 
                     // Exit raw mode, run editor, re-enter raw mode
                     disable_raw_mode()?;
@@ -1145,8 +1166,7 @@ pub fn run(session_id: &str, db_log_path: Option<&std::path::Path>) -> Result<()
                     if let Ok(s) = status
                         && s.success()
                     {
-                        // Parse edited YAML and apply via IPC
-                        // (Simplified: just reload rules to show user changes)
+                        // Reload rules to reflect any IPC-applied changes
                         app.poll_rules();
                     }
 
@@ -1621,7 +1641,7 @@ mod tests {
 
         // TUI should show all 3 rules in Cedar format
         assert!(
-            text.contains("Rules (3)"),
+            text.contains("Policy (3)"),
             "expected 3 rules, got: {}",
             text
         );
@@ -1647,13 +1667,13 @@ mod tests {
         );
         h.app.active_tab = 1;
         let text = h.poll_and_render();
-        assert!(text.contains("Rules (1)"));
+        assert!(text.contains("Policy (1)"));
 
         // Human approves a new action → rule added
         h.add_rule(Effect::Permit, "aws:s3:GetObject", "human");
         let text = h.poll_and_render();
         assert!(
-            text.contains("Rules (2)"),
+            text.contains("Policy (2)"),
             "rule not visible after human approval"
         );
         assert!(text.contains("aws:s3:GetObject"));
@@ -1846,7 +1866,7 @@ mod tests {
         h.app.active_tab = 1; // Rules tab
         let text = h.poll_and_render();
 
-        assert!(text.contains("Rules (2)"));
+        assert!(text.contains("Policy (2)"));
         assert!(text.contains("permit"), "missing permit");
         assert!(text.contains("forbid"), "missing forbid");
         assert!(text.contains("DeleteBucket"));
@@ -1861,12 +1881,12 @@ mod tests {
         h.add_rule(Effect::Permit, "aws:s3:PutObject", "human");
         h.app.active_tab = 1; // Rules tab
         let text = h.poll_and_render();
-        assert!(text.contains("Rules (2)"));
+        assert!(text.contains("Policy (2)"));
 
         // Remove one rule
         h.tree.remove_rule("test:aws:s3:GetObject");
         let text = h.poll_and_render();
-        assert!(text.contains("Rules (1)"), "rule removal not reflected");
+        assert!(text.contains("Policy (1)"), "rule removal not reflected");
         assert!(!text.contains("GetObject"), "removed rule still visible");
         assert!(text.contains("PutObject"), "remaining rule missing");
     }
